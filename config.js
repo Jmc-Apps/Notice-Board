@@ -10,4 +10,4 @@
 //
 //   window.NOTICE_BOARD_API_BASE = "https://notice-board-api.YOUR-SUBDOMAIN.workers.dev/api";
 
-window.NOTICE_BOARD_API_BASE = "https://notice-board-api.apps-bef.workers.dev/api";
+window.NOTICE_BOARD_API_BASE = "";

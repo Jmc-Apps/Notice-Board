@@ -39,6 +39,12 @@
 
 html, body {
   height: 100%;
+  /* iOS in particular can size a plain 100% shorter than what's actually
+     visible on screen (it doesn't account for the home-indicator area the
+     same way), which left the fixed bottom tab bar floating above a gap of
+     bare background. 100dvh is the *actual* visible viewport; browsers that
+     don't understand it just ignore this line and keep the 100% above. */
+  height: 100dvh;
 }
 
 body {
@@ -74,6 +80,7 @@ a { color: var(--green-dark); }
   max-width: var(--shell-max);
   margin: 0 auto;
   min-height: 100%;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   padding-bottom: calc(64px + var(--safe-bottom));

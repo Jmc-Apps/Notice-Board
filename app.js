@@ -258,7 +258,7 @@
           ${iconTasks()}<span>Tasks</span>
         </a>
         <a href="#/messages" class="${activeTab === "messages" ? "active" : ""}">
-          ${iconMessage()}<span>Messages</span>
+          ${iconMessage()}<span>Message board</span>
         </a>
         <a href="${orgTabHref}" class="${activeTab === "org" ? "active" : ""}">
           ${iconOrg()}<span>Org</span>
@@ -991,7 +991,7 @@
         </div>
         <button type="submit" class="btn block">Post</button>
       </form>
-      <div class="section-title">Messages</div>
+      <div class="section-title">Message board</div>
       ${data.messages.length ? data.messages.map(messageCardHtml).join("") : `<div class="empty">No messages yet.</div>`}
     `;
 
