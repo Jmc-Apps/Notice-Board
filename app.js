@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v9";
+  const APP_VERSION = "v11";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -492,6 +492,11 @@
             <label for="authPin">PIN</label>
             <input type="tel" inputmode="numeric" pattern="[0-9]*" id="authPin" autocomplete="current-password" required minlength="4" maxlength="8" placeholder="4-8 digits" />
           </div>
+          <div class="field" id="authCodeField" hidden>
+            <label for="authCode">Invite code</label>
+            <input type="text" id="authCode" maxlength="6" placeholder="From an owner" style="text-transform:uppercase;" />
+            <p class="meta" style="margin-top:4px;">Ask an owner for a one-time code — it's what gets you straight into their organization.</p>
+          </div>
           <div class="error-text" id="authError" hidden></div>
           <button type="submit" class="btn block" id="authSubmit">Log in</button>
         </form>
@@ -500,11 +505,13 @@
 
     let mode = "login";
     const toggleBtns = app.querySelectorAll(".tabs-toggle button");
+    const codeField = document.getElementById("authCodeField");
     toggleBtns.forEach((btn) => {
       btn.addEventListener("click", () => {
         mode = btn.dataset.mode;
         toggleBtns.forEach((b) => b.classList.toggle("active", b === btn));
         document.getElementById("authSubmit").textContent = mode === "login" ? "Log in" : "Create account";
+        codeField.hidden = mode !== "register";
       });
     });
 
@@ -512,6 +519,7 @@
       e.preventDefault();
       const name = document.getElementById("authName").value.trim();
       const pin = document.getElementById("authPin").value.trim();
+      const code = document.getElementById("authCode").value.trim();
       const errorEl = document.getElementById("authError");
       errorEl.hidden = true;
       if (!name || !pin) return;
@@ -521,7 +529,7 @@
       try {
         const data = await api(mode === "login" ? "/login" : "/register", {
           method: "POST",
-          body: { name, pin },
+          body: mode === "login" ? { name, pin } : { name, pin, code },
         });
         setAuth(data.token, data.user);
         location.hash = "#/messages";
@@ -1626,9 +1634,11 @@
     const editingMemberId = opts.editingMemberId || null;
 
     let ownersData = null;
+    let invitesData = null;
     if (isOwner) {
       try {
         ownersData = await api("/owners");
+        invitesData = await api(`/invite-codes?org_id=${id}`);
       } catch (err) {
         showBanner(err.message);
       }
@@ -1653,6 +1663,45 @@
                <input type="text" id="newOwnerName" maxlength="40" placeholder="Add an owner by name" required />
                <button type="submit" class="btn">Add</button>
              </form>`
+          : ""
+      }
+
+      ${
+        isOwner
+          ? `<div class="section-title">Invite people</div>
+             <p class="meta" style="margin:0 0 10px;">Registering a new Notice Board account now needs a one-time code from an owner. Generate one for this organization (and optionally a department), then send it to the person however you like — text, WhatsApp, in person.</p>
+             <form id="newInviteForm" class="card" style="margin-bottom:10px;">
+               ${
+                 departments.length
+                   ? `<div class="field" style="margin-bottom:10px;">
+                        <label for="inviteDept">Department (optional)</label>
+                        <select id="inviteDept">
+                          <option value="">Whole organization</option>
+                          ${departments.map((d) => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join("")}
+                        </select>
+                      </div>`
+                   : ""
+               }
+               <button type="submit" class="btn block">Generate invite code</button>
+             </form>
+             <div id="inviteCodeResult">
+               ${
+                 opts.justGeneratedCode
+                   ? `<div class="card" style="margin-bottom:10px;">
+                        <p class="meta" style="margin:0 0 6px;">Give this code to the new person — it works once:</p>
+                        <div class="row">
+                          <input type="text" readonly value="${escapeHtml(opts.justGeneratedCode)}" style="font-weight:600; letter-spacing:2px; text-align:center;" />
+                          <button type="button" class="btn secondary" id="copyInviteCodeBtn">Copy</button>
+                        </div>
+                      </div>`
+                   : ""
+               }
+             </div>
+             ${
+               invitesData && invitesData.invite_codes && invitesData.invite_codes.some((c) => !c.used_by)
+                 ? invitesData.invite_codes.filter((c) => !c.used_by).map(inviteRowHtml).join("")
+                 : `<div class="empty">No outstanding invite codes.</div>`
+             }`
           : ""
       }
 
@@ -1782,6 +1831,45 @@
       });
     });
 
+    const newInviteForm = document.getElementById("newInviteForm");
+    if (newInviteForm) {
+      newInviteForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const deptSelect = document.getElementById("inviteDept");
+        const department_id = deptSelect && deptSelect.value ? parseInt(deptSelect.value, 10) : null;
+        try {
+          const result = await api("/invite-codes", { method: "POST", body: { org_id: id, department_id } });
+          renderOrgDetail(id, { ...opts, justGeneratedCode: result.code });
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    }
+
+    const copyInviteCodeBtn = document.getElementById("copyInviteCodeBtn");
+    if (copyInviteCodeBtn) {
+      copyInviteCodeBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(opts.justGeneratedCode);
+          showBanner("Code copied", false);
+        } catch {
+          showBanner("Couldn't copy automatically — select and copy it manually");
+        }
+      });
+    }
+
+    view.querySelectorAll("[data-invite-revoke]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Revoke invite code ${btn.dataset.inviteCode}? It'll no longer work.`)) return;
+        try {
+          await api(`/invite-codes/${btn.dataset.inviteRevoke}`, { method: "DELETE" });
+          renderOrgDetail(id, opts);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    });
+
     const newDeptForm = document.getElementById("newDeptForm");
     if (newDeptForm) {
       newDeptForm.addEventListener("submit", async (e) => {
@@ -1825,16 +1913,19 @@
         const deptIds = Array.from(row.querySelectorAll('.dept-checks input[type="checkbox"]:checked')).map((cb) =>
           parseInt(cb.value, 10)
         );
-        // Only an owner can actually change role/management — role and
-        // management inputs are disabled (but still visible) for everyone
-        // else, so omit them from the request rather than resend an
-        // unchanged value the server would otherwise reject as an attempt
-        // to change it.
+        // Only an owner can actually change role/management — the role
+        // select is disabled (but still visible) for everyone else, so
+        // omit it from the request rather than resend an unchanged value
+        // the server would otherwise reject as an attempt to change it.
         const body = { department_ids: deptIds };
         if (isOwner) {
-          body.role = row.querySelector('[name="role"]').value;
-          const managementInput = row.querySelector('[name="management"]');
-          if (managementInput) body.management = managementInput.checked;
+          const roleValue = row.querySelector('[name="role"]').value; // member | management | admin
+          body.role = roleValue === "admin" ? "admin" : "member";
+          // Leave the management flag untouched when promoting to admin —
+          // isManager() already treats admins as managers regardless of
+          // that column, same as before this dropdown replaced the
+          // separate checkbox.
+          if (roleValue !== "admin") body.management = roleValue === "management";
         }
         try {
           await api(`/organizations/${id}/members/${userId}`, { method: "PATCH", body });
@@ -1910,6 +2001,16 @@
     `;
   }
 
+  function inviteRowHtml(invite) {
+    const scope = invite.department_name ? escapeHtml(invite.department_name) : "Whole organization";
+    return `
+      <div class="card dept-row">
+        <span><strong>${escapeHtml(invite.code)}</strong> · ${scope}</span>
+        <button class="task-del" data-invite-revoke="${invite.id}" data-invite-code="${escapeHtml(invite.code)}" aria-label="Revoke invite code">${iconTrash()}</button>
+      </div>
+    `;
+  }
+
   function ownerRowHtml(owner) {
     return `
       <div class="card dept-row">
@@ -1943,23 +2044,28 @@
       `;
     }
 
+    const roleValue = member.role === "admin" ? "admin" : member.management ? "management" : "member";
+
     return `
       <div class="card member-row" data-member-row="${member.id}">
         <h4>${escapeHtml(member.name)}</h4>
         <div class="field">
           <label>Role</label>
           <select name="role" ${isOwner ? "" : "disabled"}>
-            <option value="member" ${member.role === "member" ? "selected" : ""}>Member</option>
-            <option value="admin" ${member.role === "admin" ? "selected" : ""}>Admin</option>
+            <option value="member" ${roleValue === "member" ? "selected" : ""}>Member</option>
+            <option value="management" ${roleValue === "management" ? "selected" : ""}>Management</option>
+            <option value="admin" ${roleValue === "admin" ? "selected" : ""}>Admin</option>
           </select>
           ${isOwner ? "" : `<p class="meta" style="margin-top:6px;">Only an owner can change someone's role.</p>`}
         </div>
         ${
-          member.role === "admin"
-            ? `<p class="meta">Admins are automatically management — they can add tasks, message any department and see every department's messages.</p>`
-            : `<div class="field">
-                 <label class="dept-check"><input type="checkbox" name="management" ${member.management ? "checked" : ""} ${isOwner ? "" : "disabled"} /> Management — can add tasks, message any department, and see every department's messages</label>
-               </div>`
+          roleValue === "member"
+            ? ""
+            : `<p class="meta">${
+                roleValue === "admin"
+                  ? "Admins can add tasks, message any department, see every department's messages, and manage members."
+                  : "Management can add tasks, message any department, and see every department's messages — without full admin control."
+              }</p>`
         }
         ${
           allDepartments.length
