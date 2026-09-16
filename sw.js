@@ -4,7 +4,7 @@
 // are shared, so a cached response would show stale/wrong data to other
 // people using the app.
 
-const CACHE_NAME = "notice-board-shell-v3";
+const CACHE_NAME = "notice-board-shell-v5";
 
 // Relative to this file's own location, so the same list works whether
 // the app is served from a domain root (Cloudflare Pages) or a subfolder
@@ -33,6 +33,47 @@ self.addEventListener("activate", (event) => {
       .keys()
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
+  );
+});
+
+// ---- Push notifications ----
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    /* ignore a malformed/empty push payload */
+  }
+  const title = data.title || "Notice Board";
+  const options = {
+    body: data.body || "",
+    icon: "icons/icon-192.png",
+    badge: "icons/icon-192.png",
+    data: { url: data.url || "./" },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = (event.notification.data && event.notification.data.url) || "./";
+  const fullUrl = new URL(targetUrl, self.registration.scope).href;
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clientList) => {
+      for (const client of clientList) {
+        if ("focus" in client) {
+          try {
+            if ("navigate" in client) await client.navigate(fullUrl);
+          } catch {
+            /* some browsers restrict navigate() — focusing is still useful */
+          }
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(fullUrl);
+    })
   );
 });
 

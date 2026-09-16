@@ -5,6 +5,7 @@
   // this at a standalone Worker's URL instead, for when the site is hosted
   // somewhere that can't run the API itself (e.g. GitHub Pages).
   const API = (window.NOTICE_BOARD_API_BASE || "").trim() || "/api";
+  const VAPID_PUBLIC_KEY = (window.NOTICE_BOARD_VAPID_PUBLIC_KEY || "").trim();
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -158,6 +159,13 @@
     return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   }
 
+  function seenByText(seenBy) {
+    const names = seenBy.filter((s) => s.id !== state.user.id).map((s) => s.name);
+    if (!names.length) return "Seen by no one else yet";
+    if (names.length <= 4) return `Seen by ${names.map(escapeHtml).join(", ")}`;
+    return `Seen by ${names.slice(0, 4).map(escapeHtml).join(", ")} and ${names.length - 4} more`;
+  }
+
   let bannerTimer = null;
   function showBanner(message, isError = true) {
     const el = document.getElementById("banner");
@@ -197,6 +205,64 @@
     return data;
   }
 
+  // ---------- Push notifications ----------
+  // Per-device opt-in: this device's browser registers a push subscription
+  // with the browser's push service, and we hand that subscription to the
+  // API so it knows where to send things. Nothing here is org-specific —
+  // it's the same subscription regardless of which organization you're
+  // currently viewing.
+
+  function pushSupported() {
+    return "serviceWorker" in navigator && "PushManager" in window && !!VAPID_PUBLIC_KEY;
+  }
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+    return outputArray;
+  }
+
+  async function currentPushSubscription() {
+    if (!pushSupported()) return null;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      return await reg.pushManager.getSubscription();
+    } catch {
+      return null;
+    }
+  }
+
+  async function enablePushOnThisDevice() {
+    const reg = await navigator.serviceWorker.ready;
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") throw new Error("Notifications were blocked for this site");
+
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+    const subJson = sub.toJSON();
+    await api("/push/subscribe", { method: "POST", body: { endpoint: subJson.endpoint, keys: subJson.keys } });
+    return sub;
+  }
+
+  async function disablePushOnThisDevice() {
+    const sub = await currentPushSubscription();
+    if (!sub) return;
+    try {
+      await api("/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+    } catch {
+      /* still unsubscribe locally even if the server call fails */
+    }
+    await sub.unsubscribe();
+  }
+
   // ---------- Icons (inline SVG, currentColor) ----------
 
   function iconChecklist() {
@@ -229,10 +295,51 @@
   function iconCamera() {
     return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>`;
   }
+  function iconBell() {
+    return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`;
+  }
 
   // ---------- Shell (header + bottom tab bar) ----------
 
   const app = document.getElementById("app");
+
+  // Hidden feature: tapping the logo 5 times in a row forces a full reload
+  // from the server — unregisters the service worker and clears its caches
+  // first, so an installed PWA that's stuck on an old cached build picks up
+  // whatever's actually live. Handy for troubleshooting without needing to
+  // walk someone through clearing Safari/Chrome's site data by hand.
+  let logoTapCount = 0;
+  let logoTapTimer = null;
+
+  async function forceUpdate() {
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      if (window.caches) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch {
+      /* best-effort — reload anyway */
+    }
+    location.reload();
+  }
+
+  function handleLogoTap() {
+    logoTapCount += 1;
+    clearTimeout(logoTapTimer);
+    logoTapTimer = setTimeout(() => {
+      logoTapCount = 0;
+    }, 3000);
+    if (logoTapCount >= 5) {
+      logoTapCount = 0;
+      clearTimeout(logoTapTimer);
+      showBanner("Reloading the latest version…", false);
+      setTimeout(forceUpdate, 400);
+    }
+  }
 
   function shell(activeTab, innerHtml) {
     const org = currentOrgMeta();
@@ -240,7 +347,7 @@
 
     app.innerHTML = `
       <header class="topbar">
-        <a class="brand" href="#/checklists" aria-label="Notice Board home">
+        <a class="brand" href="#/messages" aria-label="Notice Board home">
           <img src="brand/banner.png" alt="Notice Board" />
         </a>
         <div class="who">
@@ -251,14 +358,14 @@
       ${org ? `<a class="org-strip" href="#/orgs">${iconOrg()}<span>${escapeHtml(org.name)}</span><span class="switch">Switch</span></a>` : ""}
       <main id="view">${innerHtml}</main>
       <nav class="tabbar">
+        <a href="#/messages" class="${activeTab === "messages" ? "active" : ""}">
+          ${iconMessage()}<span>Message board</span>
+        </a>
         <a href="#/checklists" class="${activeTab === "checklists" ? "active" : ""}">
           ${iconChecklist()}<span>Checklists</span>
         </a>
         <a href="#/tasks" class="${activeTab === "tasks" ? "active" : ""}">
           ${iconTasks()}<span>Tasks</span>
-        </a>
-        <a href="#/messages" class="${activeTab === "messages" ? "active" : ""}">
-          ${iconMessage()}<span>Message board</span>
         </a>
         <a href="${orgTabHref}" class="${activeTab === "org" ? "active" : ""}">
           ${iconOrg()}<span>Org</span>
@@ -267,6 +374,12 @@
     `;
     const logoutBtn = document.getElementById("logoutBtn");
     if (logoutBtn) logoutBtn.addEventListener("click", handleLogout);
+    const brandLink = app.querySelector(".topbar .brand");
+    if (brandLink) {
+      // Normal taps still navigate home as usual; this just also counts
+      // them toward the hidden 5-tap force-reload trick above.
+      brandLink.addEventListener("click", handleLogoTap);
+    }
   }
 
   async function handleLogout() {
@@ -332,7 +445,7 @@
           body: { name, pin },
         });
         setAuth(data.token, data.user);
-        location.hash = "#/checklists";
+        location.hash = "#/messages";
       } catch (err) {
         errorEl.textContent = err.message;
         errorEl.hidden = false;
@@ -978,6 +1091,8 @@
     const pickableDepartments = pickableDepartmentsFor(orgData);
     const view = document.getElementById("view");
 
+    let pendingMessageImages = [];
+
     view.innerHTML = `
       <form id="newMessageForm" class="card">
         <div class="field" style="margin-bottom:10px;">
@@ -989,11 +1104,44 @@
             ${pickableDepartments.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} only</option>`).join("")}
           </select>
         </div>
+        <div class="field" id="newMessagePhotoField" style="margin-bottom:10px;">
+          ${photoStripHtml([], { addAttr: 'id="newMessagePhotoAdd"' })}
+        </div>
         <button type="submit" class="btn block">Post</button>
       </form>
       <div class="section-title">Message board</div>
       ${data.messages.length ? data.messages.map(messageCardHtml).join("") : `<div class="empty">No messages yet.</div>`}
     `;
+
+    function renderPendingMessagePhotos() {
+      const field = document.getElementById("newMessagePhotoField");
+      if (!field) return;
+      field.innerHTML = photoStripHtml(pendingMessageImages, {
+        addAttr: 'id="newMessagePhotoAdd"',
+        removeAttr: (i) => `data-new-message-photo-remove="${i}"`,
+      });
+      wireNewMessagePhotoAdd();
+      field.querySelectorAll("[data-new-message-photo-remove]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          pendingMessageImages.splice(parseInt(btn.dataset.newMessagePhotoRemove, 10), 1);
+          renderPendingMessagePhotos();
+        });
+      });
+    }
+
+    function wireNewMessagePhotoAdd() {
+      const addLabel = document.getElementById("newMessagePhotoAdd");
+      if (!addLabel) return;
+      const input = addLabel.querySelector("input[type=file]");
+      input.addEventListener("change", async () => {
+        const room = 3 - pendingMessageImages.length;
+        if (room <= 0) return;
+        const newOnes = await resizeImageFiles(input.files, room);
+        pendingMessageImages = pendingMessageImages.concat(newOnes);
+        renderPendingMessagePhotos();
+      });
+    }
+    wireNewMessagePhotoAdd();
 
     document.getElementById("newMessageForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -1003,7 +1151,10 @@
       const deptSelect = document.getElementById("msgDept");
       const department_id = deptSelect.value ? parseInt(deptSelect.value, 10) : null;
       try {
-        await api("/messages", { method: "POST", body: { body: text, org_id: state.orgId, department_id } });
+        await api("/messages", {
+          method: "POST",
+          body: { body: text, org_id: state.orgId, department_id, images: pendingMessageImages },
+        });
         renderMessageBoard();
       } catch (err) {
         showBanner(err.message);
@@ -1012,11 +1163,13 @@
   }
 
   function messageCardHtml(m) {
+    const images = m.images || [];
     return `
       <a class="card report-row" href="#/messages/${m.id}">
         <div class="left">
           <h4>${escapeHtml(m.author_name || "Someone")}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
           <p>${escapeHtml(truncate(m.body, 140))}</p>
+          ${images.length ? photoStripHtml(images) : ""}
           <p class="meta">${formatDateTime(m.created_at)} · ${m.reply_count} repl${m.reply_count === 1 ? "y" : "ies"}</p>
         </div>
         <div class="chev">${iconChevron()}</div>
@@ -1038,6 +1191,9 @@
     const { message, replies } = data;
     const isMine = message.author_id === state.user.id;
     const view = document.getElementById("view");
+
+    let pendingReplyImages = [];
+
     view.innerHTML = `
       <a class="back-link" href="#/messages">${iconChevronLeft()} Message board</a>
       <div class="card">
@@ -1049,6 +1205,8 @@
           <button class="task-del" id="deleteMsgBtn" aria-label="Delete message">${iconTrash()}</button>
         </div>
         <p style="white-space:pre-wrap;margin:10px 0 0;">${escapeHtml(message.body)}</p>
+        ${photoStripHtml(message.images || [])}
+        <p class="meta" style="margin-top:10px;">${seenByText(message.seen_by || [])}</p>
       </div>
       <div class="section-title">Replies (${replies.length})</div>
       ${replies.map(replyHtml).join("") || `<div class="empty">No replies yet.</div>`}
@@ -1056,9 +1214,42 @@
         <div class="field" style="margin-bottom:10px;">
           <textarea id="replyBody" maxlength="2000" placeholder="Reply…" required></textarea>
         </div>
+        <div class="field" id="newReplyPhotoField" style="margin-bottom:10px;">
+          ${photoStripHtml([], { addAttr: 'id="newReplyPhotoAdd"' })}
+        </div>
         <button type="submit" class="btn block">Reply</button>
       </form>
     `;
+
+    function renderPendingReplyPhotos() {
+      const field = document.getElementById("newReplyPhotoField");
+      if (!field) return;
+      field.innerHTML = photoStripHtml(pendingReplyImages, {
+        addAttr: 'id="newReplyPhotoAdd"',
+        removeAttr: (i) => `data-new-reply-photo-remove="${i}"`,
+      });
+      wireNewReplyPhotoAdd();
+      field.querySelectorAll("[data-new-reply-photo-remove]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          pendingReplyImages.splice(parseInt(btn.dataset.newReplyPhotoRemove, 10), 1);
+          renderPendingReplyPhotos();
+        });
+      });
+    }
+
+    function wireNewReplyPhotoAdd() {
+      const addLabel = document.getElementById("newReplyPhotoAdd");
+      if (!addLabel) return;
+      const input = addLabel.querySelector("input[type=file]");
+      input.addEventListener("change", async () => {
+        const room = 3 - pendingReplyImages.length;
+        if (room <= 0) return;
+        const newOnes = await resizeImageFiles(input.files, room);
+        pendingReplyImages = pendingReplyImages.concat(newOnes);
+        renderPendingReplyPhotos();
+      });
+    }
+    wireNewReplyPhotoAdd();
 
     document.getElementById("replyForm").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -1066,7 +1257,7 @@
       const text = el.value.trim();
       if (!text) return;
       try {
-        await api(`/messages/${id}/replies`, { method: "POST", body: { body: text } });
+        await api(`/messages/${id}/replies`, { method: "POST", body: { body: text, images: pendingReplyImages } });
         renderMessageDetail(id);
       } catch (err) {
         showBanner(err.message);
@@ -1085,11 +1276,13 @@
   }
 
   function replyHtml(r) {
+    const images = r.images || [];
     return `
       <div class="card">
         <h4 style="margin:0 0 3px;font-size:14px;">${escapeHtml(r.author_name || "Someone")}</h4>
         <p class="meta" style="margin:0 0 6px;">${formatDateTime(r.created_at)}</p>
         <p style="white-space:pre-wrap;margin:0;">${escapeHtml(r.body)}</p>
+        ${images.length ? photoStripHtml(images) : ""}
       </div>
     `;
   }
@@ -1162,7 +1355,15 @@
       return;
     }
 
-    const { organization, my_role, departments, members } = data;
+    const {
+      organization,
+      my_role,
+      departments,
+      members,
+      photo_retention_messages_days,
+      photo_retention_checklist_days,
+      photo_retention_tasks_days,
+    } = data;
     const isAdmin = my_role === "admin";
     const isCurrent = String(id) === String(state.orgId);
     const editingMemberId = opts.editingMemberId || null;
@@ -1175,6 +1376,17 @@
         isCurrent
           ? `<p class="meta" style="margin-bottom:16px;">This is your current organization.</p>`
           : `<button class="btn secondary block" id="makeCurrentBtn" style="margin-bottom:16px;">Make this my current organization</button>`
+      }
+
+      ${
+        pushSupported()
+          ? `<div class="section-title">Notifications</div>
+             <div class="card" id="notifCard">
+               <p class="meta" id="notifStatus">Checking…</p>
+               <button type="button" class="btn secondary block" id="notifToggleBtn" style="margin-top:8px;" disabled>…</button>
+               <p class="meta" style="margin-top:8px;">Get notified on this device for new tasks, new message board posts, and completed checklists. Turned on separately per device.</p>
+             </div>`
+          : ""
       }
 
       <div class="section-title">Departments</div>
@@ -1191,6 +1403,28 @@
       <div class="section-title">Members</div>
       ${members.map((m) => memberRowHtml(m, isAdmin, departments, editingMemberId === m.id)).join("")}
       ${isAdmin ? newMemberFormHtml(departments) : ""}
+
+      ${
+        isAdmin
+          ? `<div class="section-title">Photo retention</div>
+             <form id="retentionForm" class="card">
+               <p class="meta" style="margin:0 0 10px;">Automatically delete photos after this many days. Leave blank to keep them forever.</p>
+               <div class="field" style="margin-bottom:10px;">
+                 <label for="retMessages">Message board photos (days)</label>
+                 <input type="number" id="retMessages" min="1" step="1" placeholder="Never" value="${photo_retention_messages_days ?? ""}" />
+               </div>
+               <div class="field" style="margin-bottom:10px;">
+                 <label for="retChecklist">Checklist photos (days)</label>
+                 <input type="number" id="retChecklist" min="1" step="1" placeholder="Never" value="${photo_retention_checklist_days ?? ""}" />
+               </div>
+               <div class="field" style="margin-bottom:10px;">
+                 <label for="retTasks">Task photos (days)</label>
+                 <input type="number" id="retTasks" min="1" step="1" placeholder="Never" value="${photo_retention_tasks_days ?? ""}" />
+               </div>
+               <button type="submit" class="btn block">Save retention settings</button>
+             </form>`
+          : ""
+      }
     `;
 
     const makeCurrentBtn = document.getElementById("makeCurrentBtn");
@@ -1198,6 +1432,45 @@
       makeCurrentBtn.addEventListener("click", () => {
         setCurrentOrg(id);
         renderOrgDetail(id);
+      });
+    }
+
+    const notifToggleBtn = document.getElementById("notifToggleBtn");
+    if (notifToggleBtn) {
+      const notifStatus = document.getElementById("notifStatus");
+
+      function paintNotifState(subscribed) {
+        if (Notification.permission === "denied") {
+          notifStatus.textContent = "Notifications are blocked for this site in your browser settings.";
+          notifToggleBtn.textContent = "Blocked";
+          notifToggleBtn.disabled = true;
+          return;
+        }
+        notifStatus.textContent = subscribed
+          ? "Notifications are on for this device."
+          : "Notifications are off for this device.";
+        notifToggleBtn.textContent = subscribed ? "Turn off" : "Turn on";
+        notifToggleBtn.disabled = false;
+      }
+
+      currentPushSubscription().then((sub) => paintNotifState(!!sub));
+
+      notifToggleBtn.addEventListener("click", async () => {
+        notifToggleBtn.disabled = true;
+        try {
+          const sub = await currentPushSubscription();
+          if (sub) {
+            await disablePushOnThisDevice();
+            paintNotifState(false);
+          } else {
+            await enablePushOnThisDevice();
+            paintNotifState(true);
+          }
+        } catch (err) {
+          showBanner(err.message);
+          const sub = await currentPushSubscription();
+          paintNotifState(!!sub);
+        }
       });
     }
 
@@ -1266,6 +1539,31 @@
         }
       });
     });
+
+    const retentionForm = document.getElementById("retentionForm");
+    if (retentionForm) {
+      retentionForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const val = (elId) => {
+          const v = document.getElementById(elId).value.trim();
+          return v === "" ? null : v;
+        };
+        try {
+          await api(`/organizations/${id}`, {
+            method: "PATCH",
+            body: {
+              photo_retention_messages_days: val("retMessages"),
+              photo_retention_checklist_days: val("retChecklist"),
+              photo_retention_tasks_days: val("retTasks"),
+            },
+          });
+          showBanner("Retention settings saved", false);
+          renderOrgDetail(id);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    }
 
     const newMemberForm = document.getElementById("newMemberForm");
     if (newMemberForm) {
@@ -1400,11 +1698,11 @@
       return;
     }
     if (state.token && parts[0] === "login") {
-      location.hash = "#/checklists";
+      location.hash = "#/messages";
       return;
     }
     if (parts.length === 0) {
-      location.hash = "#/checklists";
+      location.hash = "#/messages";
       return;
     }
     if (parts[0] === "login") return renderLogin();
@@ -1443,7 +1741,7 @@
       if (parts[0] === "tasks") return renderTasks();
       if (parts[0] === "messages" && parts.length === 1) return renderMessageBoard();
       if (parts[0] === "messages" && parts[1]) return renderMessageDetail(parts[1]);
-      location.hash = "#/checklists";
+      location.hash = "#/messages";
     } catch (err) {
       console.error(err);
       showBanner((err && err.message) || "Something went wrong");

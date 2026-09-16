@@ -11,3 +11,8 @@
 //   window.NOTICE_BOARD_API_BASE = "https://notice-board-api.YOUR-SUBDOMAIN.workers.dev/api";
 
 window.NOTICE_BOARD_API_BASE = "https://notice-board-api.apps-bef.workers.dev/api";
+
+// Public half of the VAPID key pair used for push notifications — safe to
+// be public (the matching private key lives only as a Cloudflare secret).
+// See README.md, "Push notifications", if you ever regenerate these.
+window.NOTICE_BOARD_VAPID_PUBLIC_KEY = "BI0-hdshU8l3Mj1v1mCgt3jO9R-j408aL71qXXECEOiLD4y9dvGwauccTQP_-eQyCvT4GhbpiPkbthwGvNw3_mo";
