@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v12";
+  const APP_VERSION = "v13";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -29,6 +29,12 @@
     user: safeParse(localStorage.getItem(STORAGE_USER)),
     orgId: localStorage.getItem(STORAGE_ORG) || null,
     orgs: [], // cached list of { id, name, role } for the current user
+    // Which of the Group/Personal toggle is showing on the Tasks and
+    // Checklists tabs. In-memory only (not persisted) — each tab defaults
+    // back to "group" the next time the app is opened fresh, but keeps
+    // whatever you last picked for the rest of this session.
+    taskView: "group",
+    checklistView: "group",
   };
 
   function setAuth(token, user) {
@@ -544,6 +550,31 @@
 
   // ---------- Checklist list ----------
 
+  // Shared Group/Personal segmented toggle for the Tasks and Checklists
+  // tabs — sits right below the org switcher strip. `stateKey` is either
+  // "taskView" or "checklistView" so each tab remembers its own choice
+  // independently (in-memory only — resets to "group" on a fresh app
+  // open); `onSwitch` re-renders that tab's screen.
+  function viewToggleHtml(current) {
+    return `
+      <div class="tabs-toggle view-toggle">
+        <button type="button" data-view-toggle="group" class="${current === "group" ? "active" : ""}">Group</button>
+        <button type="button" data-view-toggle="personal" class="${current === "personal" ? "active" : ""}">Personal</button>
+      </div>
+    `;
+  }
+
+  function wireViewToggle(view, stateKey, onSwitch) {
+    view.querySelectorAll("[data-view-toggle]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const next = btn.dataset.viewToggle;
+        if (state[stateKey] === next) return;
+        state[stateKey] = next;
+        onSwitch();
+      });
+    });
+  }
+
   async function renderChecklistList() {
     shell("checklists", `<div class="empty">Loading…</div>`);
     let data;
@@ -556,23 +587,25 @@
 
     const groupChecklists = data.checklists.filter((c) => c.visibility !== "personal");
     const personalChecklists = data.checklists.filter((c) => c.visibility === "personal");
+    const showingPersonal = state.checklistView === "personal";
+    const shown = showingPersonal ? personalChecklists : groupChecklists;
 
     const view = document.getElementById("view");
     view.innerHTML = `
-      <div class="section-title">Group checklists</div>
+      ${viewToggleHtml(state.checklistView)}
       ${
-        groupChecklists.length
-          ? groupChecklists.map(checklistCardHtml).join("")
-          : `<div class="empty">No group checklists yet.</div>`
+        showingPersonal
+          ? `<p class="meta" style="margin:0 0 10px;">Only visible to you — not even an admin or owner can see these.</p>`
+          : ""
       }
-      <div class="section-title" style="margin-top:20px;">Personal checklists</div>
-      <p class="meta" style="margin:0 0 10px;">Only visible to you — not even an admin or owner can see these.</p>
       ${
-        personalChecklists.length
-          ? personalChecklists.map(checklistCardHtml).join("")
-          : `<div class="empty">No personal checklists yet.</div>`
+        shown.length
+          ? shown.map(checklistCardHtml).join("")
+          : `<div class="empty">No ${showingPersonal ? "personal" : "group"} checklists yet.</div>`
       }
     `;
+
+    wireViewToggle(view, "checklistView", renderChecklistList);
 
     // Anyone can create a personal checklist; only an admin/owner can also
     // create a group one — that choice lives inside the new-checklist form.
@@ -1080,12 +1113,12 @@
     const groupDone = groupTasks.filter((t) => t.done);
     const personalOpen = personalTasks.filter((t) => !t.done);
     const personalDone = personalTasks.filter((t) => t.done);
+    const showingPersonal = state.taskView === "personal";
 
     let pendingGroupImages = [];
     let pendingPersonalImages = [];
 
-    view.innerHTML = `
-      <div class="section-title">Group tasks</div>
+    const groupSectionHtml = `
       ${
         canCreateGroup
           ? `<form id="newGroupTaskForm" class="card">
@@ -1124,8 +1157,9 @@
           ? `<div class="section-title">Done (${groupDone.length})</div><ul class="item-list" id="doneGroupTasks">${groupDone.map(taskRowHtml).join("")}</ul>`
           : ""
       }
+    `;
 
-      <div class="section-title" style="margin-top:24px;">Personal tasks</div>
+    const personalSectionHtml = `
       <p class="meta" style="margin:0 0 10px;">Only visible to you — plus anything a manager assigns to you.</p>
       <form id="newPersonalTaskForm" class="card">
         <div class="field" style="margin-bottom:10px;">
@@ -1146,6 +1180,13 @@
           : ""
       }
     `;
+
+    view.innerHTML = `
+      ${viewToggleHtml(state.taskView)}
+      ${showingPersonal ? personalSectionHtml : groupSectionHtml}
+    `;
+
+    wireViewToggle(view, "taskView", renderTasks);
 
     // Sets up one pending-photo picker (the "add a task" card's photo
     // strip). getPending/setPending read and write the closure variable
@@ -1185,20 +1226,23 @@
       wireAdd();
     }
 
-    setupPendingPhotos(
-      "newGroupTaskPhotoField",
-      "newGroupTaskPhotoAdd",
-      () => pendingGroupImages,
-      (v) => (pendingGroupImages = v),
-      "data-new-group-task-photo-remove"
-    );
-    setupPendingPhotos(
-      "newPersonalTaskPhotoField",
-      "newPersonalTaskPhotoAdd",
-      () => pendingPersonalImages,
-      (v) => (pendingPersonalImages = v),
-      "data-new-personal-task-photo-remove"
-    );
+    if (!showingPersonal) {
+      setupPendingPhotos(
+        "newGroupTaskPhotoField",
+        "newGroupTaskPhotoAdd",
+        () => pendingGroupImages,
+        (v) => (pendingGroupImages = v),
+        "data-new-group-task-photo-remove"
+      );
+    } else {
+      setupPendingPhotos(
+        "newPersonalTaskPhotoField",
+        "newPersonalTaskPhotoAdd",
+        () => pendingPersonalImages,
+        (v) => (pendingPersonalImages = v),
+        "data-new-personal-task-photo-remove"
+      );
+    }
 
     const newGroupTaskForm = document.getElementById("newGroupTaskForm");
     if (newGroupTaskForm) {
