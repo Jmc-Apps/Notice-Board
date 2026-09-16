@@ -159,6 +159,29 @@
     return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   }
 
+  // ---------- Photo lightbox ----------
+  // A single delegated click listener (rather than wiring one per photo)
+  // covers every photoStripHtml() usage at once — tasks, checklist items,
+  // messages and replies — including read-only strips that never got an
+  // addAttr/removeAttr. Message cards wrap their photo strip in a clickable
+  // <a>, so we stop the click from also following that link.
+
+  function openLightbox(src) {
+    const overlay = document.createElement("div");
+    overlay.className = "lightbox-overlay";
+    overlay.innerHTML = `<img src="${src}" alt="" />`;
+    overlay.addEventListener("click", () => overlay.remove());
+    document.body.appendChild(overlay);
+  }
+
+  document.addEventListener("click", (e) => {
+    const thumb = e.target.closest(".photo-thumb");
+    if (!thumb) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openLightbox(thumb.src);
+  });
+
   function seenByText(seenBy) {
     const names = seenBy.filter((s) => s.id !== state.user.id).map((s) => s.name);
     if (!names.length) return "Seen by no one else yet";
@@ -263,6 +286,48 @@
     await sub.unsubscribe();
   }
 
+  // ---------- App icon badges ----------
+  // The number on the home-screen icon. The service worker sets it
+  // instantly from the count embedded in each push payload (see
+  // lib/push.js / public/sw.js); syncBadge() re-derives the true count
+  // from the server so it stays right even across devices or if a push
+  // was missed. "Seen" is per-surface: messages clear via the existing
+  // read-receipt tracking, tasks clear on opening the Tasks tab (for that
+  // organization), checklists clear on opening that specific checklist.
+
+  function badgeSupported() {
+    return "setAppBadge" in navigator && "clearAppBadge" in navigator;
+  }
+
+  async function syncBadge() {
+    if (!badgeSupported()) return;
+    try {
+      const counts = await api("/notifications/badge");
+      if (counts.total > 0) await navigator.setAppBadge(counts.total);
+      else await navigator.clearAppBadge();
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function markTasksViewed(orgId) {
+    try {
+      await api("/notifications/tasks-viewed", { method: "POST", body: { org_id: orgId } });
+    } catch {
+      /* best-effort */
+    }
+    syncBadge();
+  }
+
+  async function markChecklistViewed(checklistId) {
+    try {
+      await api(`/checklists/${checklistId}/viewed`, { method: "POST" });
+    } catch {
+      /* best-effort */
+    }
+    syncBadge();
+  }
+
   // ---------- Icons (inline SVG, currentColor) ----------
 
   function iconChecklist() {
@@ -341,7 +406,8 @@
     }
   }
 
-  function shell(activeTab, innerHtml) {
+  function shell(activeTab, innerHtml, opts) {
+    opts = opts || {};
     const org = currentOrgMeta();
     const orgTabHref = state.orgId ? `#/orgs/${state.orgId}` : "#/orgs";
 
@@ -355,7 +421,7 @@
           <button class="icon-btn" id="logoutBtn" title="Switch user" aria-label="Switch user">${iconLogout()}</button>
         </div>
       </header>
-      ${org ? `<a class="org-strip" href="#/orgs">${iconOrg()}<span>${escapeHtml(org.name)}</span><span class="switch">Switch</span></a>` : ""}
+      ${org && !opts.hideOrgStrip ? `<a class="org-strip" href="#/orgs">${iconOrg()}<span>${escapeHtml(org.name)}</span><span class="switch">Switch</span></a>` : ""}
       <main id="view">${innerHtml}</main>
       <nav class="tabbar">
         <a href="#/messages" class="${activeTab === "messages" ? "active" : ""}">
@@ -657,6 +723,8 @@
       return;
     }
 
+    markChecklistViewed(id);
+
     const { checklist, run } = data;
     const isDone = run.status === "completed";
     const allChecked = run.items.length > 0 && run.items.every((i) => i.checked);
@@ -884,6 +952,8 @@
       return;
     }
 
+    markTasksViewed(state.orgId);
+
     const canCreate = isManagerFlag(orgData);
     const pickableDepartments = pickableDepartmentsFor(orgData);
 
@@ -1076,33 +1146,70 @@
   }
 
   // ---------- Message board ----------
+  // Reads across every organization this person belongs to (fetched in
+  // parallel, merged, and tagged by org) with org + department filters.
+  // Composing still targets one organization at a time — that's a
+  // deliberate scope cut for this round; cross-org posting is planned
+  // separately. The "current org" strip is hidden on this tab specifically
+  // since the board itself isn't tied to one organization any more.
 
   async function renderMessageBoard() {
-    shell("messages", `<div class="empty">Loading…</div>`);
-    let data, orgData;
+    shell("messages", `<div class="empty">Loading…</div>`, { hideOrgStrip: true });
+
+    let perOrg;
     try {
-      data = await api(`/messages?org_id=${state.orgId}`);
-      orgData = await api(`/organizations/${state.orgId}`);
+      perOrg = await Promise.all(
+        state.orgs.map(async (org) => {
+          const [msgData, orgData] = await Promise.all([api(`/messages?org_id=${org.id}`), api(`/organizations/${org.id}`)]);
+          return { org, messages: msgData.messages, orgData };
+        })
+      );
     } catch (err) {
       showBanner(err.message);
       return;
     }
 
-    const pickableDepartments = pickableDepartmentsFor(orgData);
-    const view = document.getElementById("view");
+    const showOrgUi = state.orgs.length > 1;
 
+    let allMessages = [];
+    perOrg.forEach(({ org, messages }) => {
+      messages.forEach((m) => allMessages.push({ ...m, org_id: org.id, org_name: org.name }));
+    });
+    allMessages.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+
+    function entryForOrg(orgId) {
+      return perOrg.find((p) => String(p.org.id) === String(orgId));
+    }
+
+    const composeOrgId = state.orgId && entryForOrg(state.orgId) ? state.orgId : perOrg[0].org.id;
+
+    const view = document.getElementById("view");
     let pendingMessageImages = [];
+    let filterOrgId = "";
+    let filterDeptId = "";
 
     view.innerHTML = `
       <form id="newMessageForm" class="card">
         <div class="field" style="margin-bottom:10px;">
           <textarea id="msgBody" maxlength="4000" placeholder="Write a message…" required></textarea>
         </div>
+        ${
+          showOrgUi
+            ? `<div class="field" style="margin-bottom:10px;">
+                 <label for="msgOrg">Post to</label>
+                 <select id="msgOrg">
+                   ${perOrg
+                     .map(
+                       ({ org }) =>
+                         `<option value="${org.id}" ${String(org.id) === String(composeOrgId) ? "selected" : ""}>${escapeHtml(org.name)}</option>`
+                     )
+                     .join("")}
+                 </select>
+               </div>`
+            : ""
+        }
         <div class="field" style="margin-bottom:10px;">
-          <select id="msgDept">
-            <option value="">Whole organization</option>
-            ${pickableDepartments.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} only</option>`).join("")}
-          </select>
+          <select id="msgDept"></select>
         </div>
         <div class="field" id="newMessagePhotoField" style="margin-bottom:10px;">
           ${photoStripHtml([], { addAttr: 'id="newMessagePhotoAdd"' })}
@@ -1110,7 +1217,20 @@
         <button type="submit" class="btn block">Post</button>
       </form>
       <div class="section-title">Message board</div>
-      ${data.messages.length ? data.messages.map(messageCardHtml).join("") : `<div class="empty">No messages yet.</div>`}
+      ${
+        showOrgUi
+          ? `<div class="row" style="margin-bottom:10px;">
+               <select id="filterOrg">
+                 <option value="">All organizations</option>
+                 ${perOrg.map(({ org }) => `<option value="${org.id}">${escapeHtml(org.name)}</option>`).join("")}
+               </select>
+               <select id="filterDept" disabled>
+                 <option value="">All departments</option>
+               </select>
+             </div>`
+          : ""
+      }
+      <div id="messageList">${allMessages.length ? allMessages.map((m) => messageCardHtml(m, showOrgUi)).join("") : `<div class="empty">No messages yet.</div>`}</div>
     `;
 
     function renderPendingMessagePhotos() {
@@ -1143,31 +1263,81 @@
     }
     wireNewMessagePhotoAdd();
 
+    const msgOrgSelect = document.getElementById("msgOrg");
+    const msgDeptSelect = document.getElementById("msgDept");
+    function refreshComposeDepartments() {
+      const orgId = msgOrgSelect ? msgOrgSelect.value : composeOrgId;
+      const entry = entryForOrg(orgId);
+      const pickable = entry ? pickableDepartmentsFor(entry.orgData) : [];
+      msgDeptSelect.innerHTML =
+        `<option value="">Whole organization</option>` +
+        pickable.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} only</option>`).join("");
+    }
+    refreshComposeDepartments();
+    if (msgOrgSelect) msgOrgSelect.addEventListener("change", refreshComposeDepartments);
+
     document.getElementById("newMessageForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const bodyEl = document.getElementById("msgBody");
       const text = bodyEl.value.trim();
       if (!text) return;
-      const deptSelect = document.getElementById("msgDept");
-      const department_id = deptSelect.value ? parseInt(deptSelect.value, 10) : null;
+      const orgId = msgOrgSelect ? msgOrgSelect.value : composeOrgId;
+      const department_id = msgDeptSelect.value ? parseInt(msgDeptSelect.value, 10) : null;
       try {
         await api("/messages", {
           method: "POST",
-          body: { body: text, org_id: state.orgId, department_id, images: pendingMessageImages },
+          body: { body: text, org_id: orgId, department_id, images: pendingMessageImages },
         });
         renderMessageBoard();
       } catch (err) {
         showBanner(err.message);
       }
     });
+
+    const filterOrgSelect = document.getElementById("filterOrg");
+    const filterDeptSelect = document.getElementById("filterDept");
+
+    function renderFilteredList() {
+      const listEl = document.getElementById("messageList");
+      const msgs = allMessages.filter((m) => {
+        if (filterOrgId && String(m.org_id) !== String(filterOrgId)) return false;
+        if (filterDeptId === "org-wide" && m.department_id) return false;
+        if (filterDeptId && filterDeptId !== "org-wide" && String(m.department_id) !== String(filterDeptId)) return false;
+        return true;
+      });
+      listEl.innerHTML = msgs.length ? msgs.map((m) => messageCardHtml(m, showOrgUi)).join("") : `<div class="empty">No messages match this filter.</div>`;
+    }
+
+    if (filterOrgSelect) {
+      filterOrgSelect.addEventListener("change", () => {
+        filterOrgId = filterOrgSelect.value;
+        filterDeptId = "";
+        if (!filterOrgId) {
+          filterDeptSelect.innerHTML = `<option value="">All departments</option>`;
+          filterDeptSelect.disabled = true;
+        } else {
+          const entry = entryForOrg(filterOrgId);
+          const depts = entry ? entry.orgData.departments : [];
+          filterDeptSelect.innerHTML =
+            `<option value="">All departments</option><option value="org-wide">Org-wide only</option>` +
+            depts.map((d) => `<option value="${d.id}">${escapeHtml(d.name)}</option>`).join("");
+          filterDeptSelect.disabled = false;
+        }
+        renderFilteredList();
+      });
+      filterDeptSelect.addEventListener("change", () => {
+        filterDeptId = filterDeptSelect.value;
+        renderFilteredList();
+      });
+    }
   }
 
-  function messageCardHtml(m) {
+  function messageCardHtml(m, showOrg) {
     const images = m.images || [];
     return `
       <a class="card report-row" href="#/messages/${m.id}">
         <div class="left">
-          <h4>${escapeHtml(m.author_name || "Someone")}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
+          <h4>${escapeHtml(m.author_name || "Someone")}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
           <p>${escapeHtml(truncate(m.body, 140))}</p>
           ${images.length ? photoStripHtml(images) : ""}
           <p class="meta">${formatDateTime(m.created_at)} · ${m.reply_count} repl${m.reply_count === 1 ? "y" : "ies"}</p>
@@ -1178,7 +1348,7 @@
   }
 
   async function renderMessageDetail(id) {
-    shell("messages", `<div class="empty">Loading…</div>`);
+    shell("messages", `<div class="empty">Loading…</div>`, { hideOrgStrip: true });
     let data;
     try {
       data = await api(`/messages/${id}`);
@@ -1187,6 +1357,8 @@
       location.hash = "#/messages";
       return;
     }
+
+    syncBadge(); // the detail fetch above just recorded this message as read
 
     const { message, replies } = data;
     const isMine = message.author_id === state.user.id;
@@ -1199,7 +1371,7 @@
       <div class="card">
         <div class="member-top">
           <div>
-            <h4>${escapeHtml(message.author_name || "Someone")}${message.department_name ? ` <span class="badge">${escapeHtml(message.department_name)}</span>` : ""}</h4>
+            <h4>${escapeHtml(message.author_name || "Someone")}${message.org_name ? ` <span class="badge">${escapeHtml(message.org_name)}</span>` : ""}${message.department_name ? ` <span class="badge">${escapeHtml(message.department_name)}</span>` : ""}</h4>
             <p class="meta">${formatDateTime(message.created_at)}</p>
           </div>
           <button class="task-del" id="deleteMsgBtn" aria-label="Delete message">${iconTrash()}</button>
@@ -1293,19 +1465,28 @@
     shell("org", `<div class="empty">Loading…</div>`);
     const view = document.getElementById("view");
 
+    const isOwner = !!(state.user && state.user.is_owner);
+
     view.innerHTML = `
       ${
         state.orgs.length
           ? `<div class="section-title">Your organizations</div>${state.orgs.map(orgRowHtml).join("")}`
-          : `<div class="empty">You're not part of an organization yet.<br />Create one below, or ask an admin to add you by your name.</div>`
+          : `<div class="empty">You're not part of an organization yet.<br />${
+              isOwner ? "Create one below, or ask an admin to add you by your name." : "Ask an owner to create one, or an admin to add you by your name."
+            }</div>`
       }
-      <div class="section-title">Create an organization</div>
-      <form id="newOrgForm" class="card">
-        <div class="field" style="margin-bottom:10px;">
-          <input type="text" id="orgName" maxlength="80" placeholder="Organization name" required />
-        </div>
-        <button type="submit" class="btn block">Create organization</button>
-      </form>
+      ${
+        isOwner
+          ? `<div class="section-title">Create an organization</div>
+             <form id="newOrgForm" class="card">
+               <div class="field" style="margin-bottom:10px;">
+                 <input type="text" id="orgName" maxlength="80" placeholder="Organization name" required />
+               </div>
+               <button type="submit" class="btn block">Create organization</button>
+             </form>`
+          : `<div class="section-title">Create an organization</div>
+             <div class="empty">Only an owner can create new organizations.</div>`
+      }
     `;
 
     view.querySelectorAll("[data-org-switch]").forEach((row) => {
@@ -1315,19 +1496,22 @@
       });
     });
 
-    document.getElementById("newOrgForm").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const input = document.getElementById("orgName");
-      const name = input.value.trim();
-      if (!name) return;
-      try {
-        const data = await api("/organizations", { method: "POST", body: { name } });
-        setCurrentOrg(data.id);
-        location.hash = `#/orgs/${data.id}`;
-      } catch (err) {
-        showBanner(err.message);
-      }
-    });
+    const newOrgForm = document.getElementById("newOrgForm");
+    if (newOrgForm) {
+      newOrgForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = document.getElementById("orgName");
+        const name = input.value.trim();
+        if (!name) return;
+        try {
+          const data = await api("/organizations", { method: "POST", body: { name } });
+          setCurrentOrg(data.id);
+          location.hash = `#/orgs/${data.id}`;
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    }
   }
 
   function orgRowHtml(org) {
@@ -1365,8 +1549,18 @@
       photo_retention_tasks_days,
     } = data;
     const isAdmin = my_role === "admin";
+    const isOwner = !!(state.user && state.user.is_owner);
     const isCurrent = String(id) === String(state.orgId);
     const editingMemberId = opts.editingMemberId || null;
+
+    let ownersData = null;
+    if (isOwner) {
+      try {
+        ownersData = await api("/owners");
+      } catch (err) {
+        showBanner(err.message);
+      }
+    }
 
     const view = document.getElementById("view");
     view.innerHTML = `
@@ -1376,6 +1570,18 @@
         isCurrent
           ? `<p class="meta" style="margin-bottom:16px;">This is your current organization.</p>`
           : `<button class="btn secondary block" id="makeCurrentBtn" style="margin-bottom:16px;">Make this my current organization</button>`
+      }
+
+      ${
+        isOwner
+          ? `<div class="section-title">Owners</div>
+             <p class="meta" style="margin:0 0 10px;">Owners can create organizations, create/remove departments anywhere, and set anyone's role or owner status.</p>
+             ${(ownersData && ownersData.owners ? ownersData.owners : []).map(ownerRowHtml).join("")}
+             <form id="newOwnerForm" class="row" style="margin-top:10px;">
+               <input type="text" id="newOwnerName" maxlength="40" placeholder="Add an owner by name" required />
+               <button type="submit" class="btn">Add</button>
+             </form>`
+          : ""
       }
 
       ${
@@ -1390,9 +1596,9 @@
       }
 
       <div class="section-title">Departments</div>
-      ${departments.length ? departments.map((d) => departmentRowHtml(d, isAdmin)).join("") : `<div class="empty">No departments yet.</div>`}
+      ${departments.length ? departments.map((d) => departmentRowHtml(d, isOwner)).join("") : `<div class="empty">No departments yet.</div>`}
       ${
-        isAdmin
+        isOwner
           ? `<form id="newDeptForm" class="row" style="margin-top:10px;">
                <input type="text" id="deptName" maxlength="60" placeholder="New department name" required />
                <button type="submit" class="btn">Add</button>
@@ -1401,7 +1607,7 @@
       }
 
       <div class="section-title">Members</div>
-      ${members.map((m) => memberRowHtml(m, isAdmin, departments, editingMemberId === m.id)).join("")}
+      ${members.map((m) => memberRowHtml(m, isAdmin, isOwner, departments, editingMemberId === m.id)).join("")}
       ${isAdmin ? newMemberFormHtml(departments) : ""}
 
       ${
@@ -1474,6 +1680,34 @@
       });
     }
 
+    const newOwnerForm = document.getElementById("newOwnerForm");
+    if (newOwnerForm) {
+      newOwnerForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = document.getElementById("newOwnerName");
+        const name = input.value.trim();
+        if (!name) return;
+        try {
+          await api("/owners", { method: "POST", body: { name } });
+          renderOrgDetail(id, opts);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    }
+
+    view.querySelectorAll("[data-owner-remove]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Remove ${btn.dataset.ownerName} as an owner?`)) return;
+        try {
+          await api(`/owners/${btn.dataset.ownerRemove}`, { method: "DELETE" });
+          renderOrgDetail(id, opts);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    });
+
     const newDeptForm = document.getElementById("newDeptForm");
     if (newDeptForm) {
       newDeptForm.addEventListener("submit", async (e) => {
@@ -1514,14 +1748,22 @@
       btn.addEventListener("click", async () => {
         const userId = btn.dataset.memberSave;
         const row = view.querySelector(`[data-member-row="${userId}"]`);
-        const role = row.querySelector('[name="role"]').value;
-        const managementInput = row.querySelector('[name="management"]');
-        const management = managementInput ? managementInput.checked : undefined;
         const deptIds = Array.from(row.querySelectorAll('.dept-checks input[type="checkbox"]:checked')).map((cb) =>
           parseInt(cb.value, 10)
         );
+        // Only an owner can actually change role/management — role and
+        // management inputs are disabled (but still visible) for everyone
+        // else, so omit them from the request rather than resend an
+        // unchanged value the server would otherwise reject as an attempt
+        // to change it.
+        const body = { department_ids: deptIds };
+        if (isOwner) {
+          body.role = row.querySelector('[name="role"]').value;
+          const managementInput = row.querySelector('[name="management"]');
+          if (managementInput) body.management = managementInput.checked;
+        }
         try {
-          await api(`/organizations/${id}/members/${userId}`, { method: "PATCH", body: { role, management, department_ids: deptIds } });
+          await api(`/organizations/${id}/members/${userId}`, { method: "PATCH", body });
           renderOrgDetail(id);
         } catch (err) {
           showBanner(err.message);
@@ -1585,16 +1827,25 @@
     }
   }
 
-  function departmentRowHtml(dept, isAdmin) {
+  function departmentRowHtml(dept, isOwner) {
     return `
       <div class="card dept-row">
         <span>${escapeHtml(dept.name)}</span>
-        ${isAdmin ? `<button class="task-del" data-dept-remove="${dept.id}" aria-label="Remove department">${iconTrash()}</button>` : ""}
+        ${isOwner ? `<button class="task-del" data-dept-remove="${dept.id}" aria-label="Remove department">${iconTrash()}</button>` : ""}
       </div>
     `;
   }
 
-  function memberRowHtml(member, isAdmin, allDepartments, isEditing) {
+  function ownerRowHtml(owner) {
+    return `
+      <div class="card dept-row">
+        <span>${escapeHtml(owner.name)}</span>
+        <button class="task-del" data-owner-remove="${owner.id}" data-owner-name="${escapeHtml(owner.name)}" aria-label="Remove owner status">${iconTrash()}</button>
+      </div>
+    `;
+  }
+
+  function memberRowHtml(member, isAdmin, isOwner, allDepartments, isEditing) {
     const deptNames = member.departments.map((d) => escapeHtml(d.name)).join(", ");
 
     const roleBadge =
@@ -1623,16 +1874,17 @@
         <h4>${escapeHtml(member.name)}</h4>
         <div class="field">
           <label>Role</label>
-          <select name="role">
+          <select name="role" ${isOwner ? "" : "disabled"}>
             <option value="member" ${member.role === "member" ? "selected" : ""}>Member</option>
             <option value="admin" ${member.role === "admin" ? "selected" : ""}>Admin</option>
           </select>
+          ${isOwner ? "" : `<p class="meta" style="margin-top:6px;">Only an owner can change someone's role.</p>`}
         </div>
         ${
           member.role === "admin"
             ? `<p class="meta">Admins are automatically management — they can add tasks, message any department and see every department's messages.</p>`
             : `<div class="field">
-                 <label class="dept-check"><input type="checkbox" name="management" ${member.management ? "checked" : ""} /> Management — can add tasks, message any department, and see every department's messages</label>
+                 <label class="dept-check"><input type="checkbox" name="management" ${member.management ? "checked" : ""} ${isOwner ? "" : "disabled"} /> Management — can add tasks, message any department, and see every department's messages</label>
                </div>`
         }
         ${
@@ -1707,6 +1959,16 @@
     }
     if (parts[0] === "login") return renderLogin();
 
+    // Refresh the signed-in user (mainly for is_owner, which can change on
+    // another device without this session's copy noticing otherwise).
+    // Best-effort — a failure here shouldn't block navigation.
+    try {
+      const me = await api("/me");
+      if (me && me.user) setAuth(state.token, me.user);
+    } catch {
+      /* keep the cached user */
+    }
+
     // Every other view depends on knowing which organizations this person
     // is in, and which one is "current" — load that first.
     try {
@@ -1745,6 +2007,8 @@
     } catch (err) {
       console.error(err);
       showBanner((err && err.message) || "Something went wrong");
+    } finally {
+      syncBadge();
     }
   }
 

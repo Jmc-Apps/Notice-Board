@@ -4,7 +4,7 @@
 // are shared, so a cached response would show stale/wrong data to other
 // people using the app.
 
-const CACHE_NAME = "notice-board-shell-v5";
+const CACHE_NAME = "notice-board-shell-v6";
 
 // Relative to this file's own location, so the same list works whether
 // the app is served from a domain root (Cloudflare Pages) or a subfolder
@@ -52,7 +52,20 @@ self.addEventListener("push", (event) => {
     badge: "icons/icon-192.png",
     data: { url: data.url || "./" },
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+
+  const tasks = [self.registration.showNotification(title, options)];
+
+  // Set the app icon badge right away, straight from the push payload's
+  // count (see lib/push.js) — instant, and doesn't need the app to be
+  // open. public/app.js's syncBadge() re-derives the true count from the
+  // server on every navigation, so this is just for immediacy; if it's
+  // ever a little off (e.g. two pushes arrive close together) that resync
+  // corrects it the next time the app is opened.
+  if (typeof data.badge === "number" && self.navigator && "setAppBadge" in self.navigator) {
+    tasks.push(data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge());
+  }
+
+  event.waitUntil(Promise.all(tasks.map((p) => Promise.resolve(p).catch(() => {}))));
 });
 
 self.addEventListener("notificationclick", (event) => {

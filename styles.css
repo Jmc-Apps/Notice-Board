@@ -686,3 +686,26 @@ main {
 #replyBody {
   min-height: 80px;
 }
+
+/* ---------- Photo lightbox ---------- */
+
+.photo-thumb { cursor: zoom-in; }
+
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  cursor: zoom-out;
+}
+
+.lightbox-overlay img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+  object-fit: contain;
+}
