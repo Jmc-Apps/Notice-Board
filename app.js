@@ -6,6 +6,12 @@
   // somewhere that can't run the API itself (e.g. GitHub Pages).
   const API = (window.NOTICE_BOARD_API_BASE || "").trim() || "/api";
   const VAPID_PUBLIC_KEY = (window.NOTICE_BOARD_VAPID_PUBLIC_KEY || "").trim();
+  // Bump this alongside CACHE_NAME in public/sw.js on every frontend
+  // change, so it's a reliable way to confirm a given device/deployment
+  // actually picked up the latest build (see the org page, where it's
+  // shown) rather than a stale cached PWA or an un-redeployed hosting
+  // target (e.g. GitHub Pages vs. Cloudflare Pages).
+  const APP_VERSION = "v9";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -57,6 +63,13 @@
 
   function isManagerFlag(orgData) {
     return orgData.my_role === "admin" || !!orgData.my_management;
+  }
+
+  // Stricter than isManagerFlag(): creating checklists is limited to org
+  // admins and global owners (management-flagged non-admins can still add
+  // tasks, just not checklists) — see lib/handlers/checklists.js create().
+  function canCreateChecklists(orgData) {
+    return orgData.my_role === "admin" || !!(state.user && state.user.is_owner);
   }
 
   function pickableDepartmentsFor(orgData) {
@@ -526,26 +539,34 @@
   async function renderChecklistList() {
     shell("checklists", `<div class="empty">Loading…</div>`);
     let data;
+    let orgData;
     try {
       data = await api(`/checklists?org_id=${state.orgId}`);
+      orgData = await api(`/organizations/${state.orgId}`);
     } catch (err) {
       showBanner(err.message);
       return;
     }
 
+    const canCreate = canCreateChecklists(orgData);
+
     const view = document.getElementById("view");
     view.innerHTML = data.checklists.length
       ? `<div class="section-title">Checklists</div>${data.checklists.map(checklistCardHtml).join("")}`
-      : `<div class="empty">No checklists yet.<br />Tap + to create your first repeatable checklist.</div>`;
+      : `<div class="empty">No checklists yet.${
+          canCreate ? "<br />Tap + to create your first repeatable checklist." : ""
+        }</div>`;
 
-    const fab = document.createElement("button");
-    fab.className = "btn-fab";
-    fab.setAttribute("aria-label", "New checklist");
-    fab.innerHTML = iconPlus();
-    fab.addEventListener("click", () => {
-      location.hash = "#/checklists/new";
-    });
-    app.appendChild(fab);
+    if (canCreate) {
+      const fab = document.createElement("button");
+      fab.className = "btn-fab";
+      fab.setAttribute("aria-label", "New checklist");
+      fab.innerHTML = iconPlus();
+      fab.addEventListener("click", () => {
+        location.hash = "#/checklists/new";
+      });
+      app.appendChild(fab);
+    }
   }
 
   function checklistCardHtml(cl) {
@@ -582,13 +603,22 @@
   async function renderChecklistForm() {
     shell("checklists", `<div class="empty">Loading…</div>`);
 
-    let pickableDepartments = [];
+    let orgData;
     try {
-      const orgData = await api(`/organizations/${state.orgId}`);
-      pickableDepartments = pickableDepartmentsFor(orgData);
+      orgData = await api(`/organizations/${state.orgId}`);
     } catch (err) {
       showBanner(err.message);
+      location.hash = "#/checklists";
+      return;
     }
+
+    if (!canCreateChecklists(orgData)) {
+      showBanner("Only an organization admin or owner can create checklists.");
+      location.hash = "#/checklists";
+      return;
+    }
+
+    const pickableDepartments = pickableDepartmentsFor(orgData);
 
     const view = document.getElementById("view");
     view.innerHTML = `
@@ -1673,6 +1703,8 @@
              </form>`
           : ""
       }
+
+      <p class="meta" style="margin-top:20px; text-align:center;">Notice Board ${APP_VERSION}</p>
     `;
 
     const makeCurrentBtn = document.getElementById("makeCurrentBtn");
