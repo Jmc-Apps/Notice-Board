@@ -4,7 +4,7 @@
 // are shared, so a cached response would show stale/wrong data to other
 // people using the app.
 
-const CACHE_NAME = "notice-board-shell-v6";
+const CACHE_NAME = "notice-board-shell-v8";
 
 // Relative to this file's own location, so the same list works whether
 // the app is served from a domain root (Cloudflare Pages) or a subfolder

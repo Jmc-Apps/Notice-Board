@@ -274,7 +274,27 @@ main {
 .field textarea { resize: vertical; min-height: 64px; }
 
 .row { display: flex; gap: 10px; }
-.row > * { flex: 1; }
+.row > * { flex: 1; min-width: 0; }
+
+/* A bare <select> outside a .field wrapper (e.g. the message board's
+   organization/department filters) would otherwise fall back to the
+   browser's native control styling — on iOS that's a light background
+   with this page's (often near-white, in dark mode) text color layered
+   on top, which reads as barely-visible white-on-white. This keeps every
+   select themed and readable regardless of where it's used, and
+   min-width: 0 above lets a flex row of selects actually shrink to fit
+   the screen instead of overflowing it. */
+select {
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+select:disabled {
+  opacity: 0.6;
+}
 
 .error-text {
   color: var(--danger);
@@ -433,6 +453,37 @@ main {
   font-size: 13px;
 }
 
+/* Text/number checklist items don't get a checkbox — this fills the same
+   spot as a plain visual "done" indicator, since for those items it's
+   entering a value (see .item-answer below) that marks them done. */
+.item-done-dot {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #fff;
+}
+
+.item-done-dot.done {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+.item-answer {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 14px;
+}
+
 .item-meta {
   font-size: 11px;
   color: var(--text-dim);
@@ -516,7 +567,15 @@ main {
   margin-bottom: 8px;
 }
 
-.item-input-row input { flex: 1; }
+.item-input-row input { flex: 1; min-width: 0; }
+
+.item-input-row select {
+  flex: 0 0 auto;
+  min-width: 0;
+  width: 84px;
+  font-size: 13px;
+  padding: 8px 6px;
+}
 
 .item-input-row button {
   border: none;

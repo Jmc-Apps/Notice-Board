@@ -642,11 +642,16 @@
     `;
 
     const itemRows = document.getElementById("itemRows");
-    function addItemRow(value, requiresPhoto) {
+    function addItemRow(value, requiresPhoto, answerType) {
       const row = document.createElement("div");
       row.className = "item-input-row";
       row.innerHTML = `
         <input type="text" maxlength="120" placeholder="Item" value="${escapeHtml(value || "")}" />
+        <select class="itemAnswerType" title="How this item is answered">
+          <option value="checkbox" ${!answerType || answerType === "checkbox" ? "selected" : ""}>Checkbox</option>
+          <option value="text" ${answerType === "text" ? "selected" : ""}>Text</option>
+          <option value="number" ${answerType === "number" ? "selected" : ""}>Number</option>
+        </select>
         <label class="photo-req-toggle" title="Require a photo before this item can be checked off">
           <input type="checkbox" class="itemPhotoReq" ${requiresPhoto ? "checked" : ""} />${iconCamera()}
         </label>
@@ -679,6 +684,7 @@
         .map((row) => ({
           label: row.querySelector('input[type="text"]').value.trim(),
           requires_photo: row.querySelector(".itemPhotoReq").checked,
+          answer_type: row.querySelector(".itemAnswerType").value,
         }))
         .filter((it) => it.label);
 
@@ -749,6 +755,21 @@
            <a class="btn secondary block" style="margin-top:8px;" href="#/checklists/${id}/history">View past reports</a>`}
     `;
 
+    // Checkbox items report their done state as {checked}; text/number
+    // items don't have a checkbox at all — entering a value is what marks
+    // them done (see toggleItem() on the server) — so they report
+    // {answer} instead, read from their own input's current value.
+    function currentDoneStatePayload(itemId) {
+      const itemData = run.items.find((i) => String(i.item_id) === String(itemId));
+      const isCheckbox = !itemData || !itemData.answer_type || itemData.answer_type === "checkbox";
+      if (isCheckbox) {
+        const cb = view.querySelector(`[data-item="${itemId}"]`);
+        return { checked: cb ? cb.checked : false };
+      }
+      const answerEl = view.querySelector(`[data-answer="${itemId}"]`);
+      return { answer: answerEl ? answerEl.value : itemData.answer };
+    }
+
     view.querySelectorAll("[data-item]").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const itemId = cb.dataset.item;
@@ -766,14 +787,29 @@
       });
     });
 
-    view.querySelectorAll("[data-note]").forEach((input) => {
+    view.querySelectorAll("[data-answer]").forEach((input) => {
       input.addEventListener("change", async () => {
-        const itemId = input.dataset.note;
-        const cb = view.querySelector(`[data-item="${itemId}"]`);
+        const itemId = input.dataset.answer;
+        const noteEl = view.querySelector(`[data-note="${itemId}"]`);
         try {
           await api(`/runs/${run.id}/items/${itemId}`, {
             method: "PATCH",
-            body: { checked: cb ? cb.checked : false, note: input.value },
+            body: { answer: input.value, note: noteEl ? noteEl.value : undefined },
+          });
+          renderChecklistDetail(id);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    });
+
+    view.querySelectorAll("[data-note]").forEach((input) => {
+      input.addEventListener("change", async () => {
+        const itemId = input.dataset.note;
+        try {
+          await api(`/runs/${run.id}/items/${itemId}`, {
+            method: "PATCH",
+            body: { ...currentDoneStatePayload(itemId), note: input.value },
           });
         } catch (err) {
           showBanner(err.message);
@@ -791,12 +827,11 @@
         if (room <= 0) return;
         const newOnes = await resizeImageFiles(input.files, room);
         if (!newOnes.length) return;
-        const cb = view.querySelector(`[data-item="${itemId}"]`);
         const noteEl = view.querySelector(`[data-note="${itemId}"]`);
         try {
           await api(`/runs/${run.id}/items/${itemId}`, {
             method: "PATCH",
-            body: { checked: cb ? cb.checked : false, note: noteEl ? noteEl.value : undefined, images: existing.concat(newOnes) },
+            body: { ...currentDoneStatePayload(itemId), note: noteEl ? noteEl.value : undefined, images: existing.concat(newOnes) },
           });
           renderChecklistDetail(id);
         } catch (err) {
@@ -811,12 +846,11 @@
         const itemData = run.items.find((i) => String(i.item_id) === String(itemId));
         const images = ((itemData && itemData.images) || []).slice();
         images.splice(parseInt(idxStr, 10), 1);
-        const cb = view.querySelector(`[data-item="${itemId}"]`);
         const noteEl = view.querySelector(`[data-note="${itemId}"]`);
         try {
           await api(`/runs/${run.id}/items/${itemId}`, {
             method: "PATCH",
-            body: { checked: cb ? cb.checked : false, note: noteEl ? noteEl.value : undefined, images },
+            body: { ...currentDoneStatePayload(itemId), note: noteEl ? noteEl.value : undefined, images },
           });
           renderChecklistDetail(id);
         } catch (err) {
@@ -851,13 +885,21 @@
           addAttr: `data-item-photo-add="${item.item_id}"`,
           removeAttr: (i) => `data-item-photo-remove="${item.item_id}:${i}"`,
         });
+    const isCheckbox = !item.answer_type || item.answer_type === "checkbox";
+    const doneControl = isCheckbox
+      ? `<input type="checkbox" data-item="${item.item_id}" ${item.checked ? "checked" : ""} ${readonly ? "disabled" : ""} />`
+      : `<span class="item-done-dot ${item.checked ? "done" : ""}" aria-hidden="true">${item.checked ? "✓" : ""}</span>`;
+    const answerField = isCheckbox
+      ? ""
+      : `<input class="item-answer" type="${item.answer_type === "number" ? "number" : "text"}" inputmode="${item.answer_type === "number" ? "decimal" : "text"}" maxlength="500" placeholder="${item.answer_type === "number" ? "Enter a number…" : "Enter an answer…"}" value="${escapeHtml(item.answer || "")}" data-answer="${item.item_id}" ${readonly ? "disabled" : ""} />`;
     return `
       <li class="item ${item.checked ? "done" : ""}">
         <label class="item-main">
-          <input type="checkbox" data-item="${item.item_id}" ${item.checked ? "checked" : ""} ${readonly ? "disabled" : ""} />
+          ${doneControl}
           <span>${escapeHtml(item.label)}</span>
           ${item.requires_photo ? '<span class="badge photo-req">📷 Photo required</span>' : ""}
         </label>
+        ${answerField}
         <input class="item-note" type="text" maxlength="2000" placeholder="Add a note…" value="${escapeHtml(item.note || "")}" data-note="${item.item_id}" ${readonly ? "disabled" : ""} />
         ${strip}
         <div class="item-meta">${
