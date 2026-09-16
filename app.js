@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v11";
+  const APP_VERSION = "v12";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -547,34 +547,43 @@
   async function renderChecklistList() {
     shell("checklists", `<div class="empty">Loading…</div>`);
     let data;
-    let orgData;
     try {
       data = await api(`/checklists?org_id=${state.orgId}`);
-      orgData = await api(`/organizations/${state.orgId}`);
     } catch (err) {
       showBanner(err.message);
       return;
     }
 
-    const canCreate = canCreateChecklists(orgData);
+    const groupChecklists = data.checklists.filter((c) => c.visibility !== "personal");
+    const personalChecklists = data.checklists.filter((c) => c.visibility === "personal");
 
     const view = document.getElementById("view");
-    view.innerHTML = data.checklists.length
-      ? `<div class="section-title">Checklists</div>${data.checklists.map(checklistCardHtml).join("")}`
-      : `<div class="empty">No checklists yet.${
-          canCreate ? "<br />Tap + to create your first repeatable checklist." : ""
-        }</div>`;
+    view.innerHTML = `
+      <div class="section-title">Group checklists</div>
+      ${
+        groupChecklists.length
+          ? groupChecklists.map(checklistCardHtml).join("")
+          : `<div class="empty">No group checklists yet.</div>`
+      }
+      <div class="section-title" style="margin-top:20px;">Personal checklists</div>
+      <p class="meta" style="margin:0 0 10px;">Only visible to you — not even an admin or owner can see these.</p>
+      ${
+        personalChecklists.length
+          ? personalChecklists.map(checklistCardHtml).join("")
+          : `<div class="empty">No personal checklists yet.</div>`
+      }
+    `;
 
-    if (canCreate) {
-      const fab = document.createElement("button");
-      fab.className = "btn-fab";
-      fab.setAttribute("aria-label", "New checklist");
-      fab.innerHTML = iconPlus();
-      fab.addEventListener("click", () => {
-        location.hash = "#/checklists/new";
-      });
-      app.appendChild(fab);
-    }
+    // Anyone can create a personal checklist; only an admin/owner can also
+    // create a group one — that choice lives inside the new-checklist form.
+    const fab = document.createElement("button");
+    fab.className = "btn-fab";
+    fab.setAttribute("aria-label", "New checklist");
+    fab.innerHTML = iconPlus();
+    fab.addEventListener("click", () => {
+      location.hash = "#/checklists/new";
+    });
+    app.appendChild(fab);
   }
 
   function checklistCardHtml(cl) {
@@ -620,12 +629,7 @@
       return;
     }
 
-    if (!canCreateChecklists(orgData)) {
-      showBanner("Only an organization admin or owner can create checklists.");
-      location.hash = "#/checklists";
-      return;
-    }
-
+    const canGroup = canCreateChecklists(orgData);
     const pickableDepartments = pickableDepartmentsFor(orgData);
 
     const view = document.getElementById("view");
@@ -633,6 +637,17 @@
       <a class="back-link" href="#/checklists">${iconChevronLeft()} Checklists</a>
       <h2>New checklist</h2>
       <form id="newChecklistForm">
+        ${
+          canGroup
+            ? `<div class="field">
+                 <label>Who can see this?</label>
+                 <div class="dept-checks">
+                   <label class="dept-check"><input type="radio" name="clVisibility" value="group" checked /> Group — my organization</label>
+                   <label class="dept-check"><input type="radio" name="clVisibility" value="personal" /> Personal — just me</label>
+                 </div>
+               </div>`
+            : `<p class="meta" style="margin-bottom:10px;">This will be a personal checklist, visible only to you — only an admin or owner can create a group checklist.</p>`
+        }
         <div class="field">
           <label for="clTitle">Title</label>
           <input type="text" id="clTitle" required maxlength="80" placeholder="e.g. Close-down checklist" />
@@ -658,7 +673,7 @@
         </div>
         ${
           pickableDepartments.length
-            ? `<div class="field">
+            ? `<div class="field" id="clDeptField">
                  <label>Visible to</label>
                  <div class="dept-checks">
                    ${pickableDepartments
@@ -678,6 +693,16 @@
         <button type="submit" class="btn block">Create checklist</button>
       </form>
     `;
+
+    const visibilityRadios = view.querySelectorAll('input[name="clVisibility"]');
+    const deptField = document.getElementById("clDeptField");
+    function syncDeptFieldVisibility() {
+      if (!deptField) return;
+      const chosen = view.querySelector('input[name="clVisibility"]:checked');
+      deptField.hidden = !!chosen && chosen.value === "personal";
+    }
+    visibilityRadios.forEach((r) => r.addEventListener("change", syncDeptFieldVisibility));
+    syncDeptFieldVisibility();
 
     const itemRows = document.getElementById("itemRows");
     function addItemRow(value, requiresPhoto, answerType) {
@@ -737,14 +762,17 @@
         return;
       }
 
-      const department_ids = Array.from(view.querySelectorAll('input[name="clDept"]:checked')).map((cb) =>
-        parseInt(cb.value, 10)
-      );
+      const chosenVisibility = view.querySelector('input[name="clVisibility"]:checked');
+      const visibility = chosenVisibility ? chosenVisibility.value : "personal";
+      const department_ids =
+        visibility === "group"
+          ? Array.from(view.querySelectorAll('input[name="clDept"]:checked')).map((cb) => parseInt(cb.value, 10))
+          : [];
 
       try {
         const data = await api("/checklists", {
           method: "POST",
-          body: { title, description, recurrence, recurrence_n, items, org_id: state.orgId, department_ids },
+          body: { title, description, recurrence, recurrence_n, items, org_id: state.orgId, department_ids, visibility },
         });
         location.hash = `#/checklists/${data.id}`;
       } catch (err) {
@@ -1034,92 +1062,179 @@
 
     markTasksViewed(state.orgId);
 
-    const canCreate = isManagerFlag(orgData);
+    const canCreateGroup = isManagerFlag(orgData);
     const pickableDepartments = pickableDepartmentsFor(orgData);
+    const myId = state.user && state.user.id;
 
     const view = document.getElementById("view");
-    const open = data.tasks.filter((t) => !t.done);
-    const done = data.tasks.filter((t) => t.done);
 
-    let pendingCreateImages = [];
+    // Group tasks: the usual shared list. Personal tasks: things only you
+    // created for yourself, PLUS any group task a manager assigned
+    // straight to you (cross-listed here for convenience — it's still a
+    // normal group task, visible to everyone per the usual rules).
+    const groupTasks = data.tasks.filter((t) => t.visibility !== "personal");
+    const personalTasks = data.tasks.filter(
+      (t) => t.visibility === "personal" || (t.assigned_to && String(t.assigned_to) === String(myId))
+    );
+    const groupOpen = groupTasks.filter((t) => !t.done);
+    const groupDone = groupTasks.filter((t) => t.done);
+    const personalOpen = personalTasks.filter((t) => !t.done);
+    const personalDone = personalTasks.filter((t) => t.done);
+
+    let pendingGroupImages = [];
+    let pendingPersonalImages = [];
 
     view.innerHTML = `
+      <div class="section-title">Group tasks</div>
       ${
-        canCreate
-          ? `<form id="newTaskForm" class="card">
+        canCreateGroup
+          ? `<form id="newGroupTaskForm" class="card">
                <div class="field" style="margin-bottom:10px;">
-                 <input type="text" id="taskTitle" maxlength="120" placeholder="Add a task…" required />
+                 <input type="text" id="groupTaskTitle" maxlength="120" placeholder="Add a group task…" required />
                </div>
                ${
                  pickableDepartments.length
                    ? `<div class="field" style="margin-bottom:10px;">
-                        <select id="taskDept">
+                        <select id="groupTaskDept">
                           <option value="">Whole organization</option>
                           ${pickableDepartments.map((d) => `<option value="${d.id}">${escapeHtml(d.name)} only</option>`).join("")}
                         </select>
                       </div>`
                    : ""
                }
-               <div class="field" id="newTaskPhotoField" style="margin-bottom:10px;">
-                 ${photoStripHtml([], { addAttr: 'id="newTaskPhotoAdd"' })}
+               <div class="field" style="margin-bottom:10px;">
+                 <select id="groupTaskAssignee">
+                   <option value="">Not assigned to anyone in particular</option>
+                   ${orgData.members.map((m) => `<option value="${m.id}">Assign to ${escapeHtml(m.name)}</option>`).join("")}
+                 </select>
                </div>
-               <button type="submit" class="btn block">Add task</button>
+               <div class="field" id="newGroupTaskPhotoField" style="margin-bottom:10px;">
+                 ${photoStripHtml([], { addAttr: 'id="newGroupTaskPhotoAdd"' })}
+               </div>
+               <button type="submit" class="btn block">Add group task</button>
              </form>`
-          : `<div class="empty">Only managers can add tasks. You can still check tasks off, add notes and photos.</div>`
+          : `<div class="empty">Only managers can add group tasks. You can still check them off, add notes and photos.</div>`
       }
-      <div class="section-title">To do (${open.length})</div>
-      <ul class="item-list" id="openTasks">
-        ${open.length ? open.map(taskRowHtml).join("") : `<div class="empty">Nothing to do — nice.</div>`}
+      <div class="section-title" style="margin-top:10px;">To do (${groupOpen.length})</div>
+      <ul class="item-list" id="openGroupTasks">
+        ${groupOpen.length ? groupOpen.map(taskRowHtml).join("") : `<div class="empty">Nothing to do — nice.</div>`}
       </ul>
       ${
-        done.length
-          ? `<div class="section-title">Done (${done.length})</div><ul class="item-list" id="doneTasks">${done.map(taskRowHtml).join("")}</ul>`
+        groupDone.length
+          ? `<div class="section-title">Done (${groupDone.length})</div><ul class="item-list" id="doneGroupTasks">${groupDone.map(taskRowHtml).join("")}</ul>`
+          : ""
+      }
+
+      <div class="section-title" style="margin-top:24px;">Personal tasks</div>
+      <p class="meta" style="margin:0 0 10px;">Only visible to you — plus anything a manager assigns to you.</p>
+      <form id="newPersonalTaskForm" class="card">
+        <div class="field" style="margin-bottom:10px;">
+          <input type="text" id="personalTaskTitle" maxlength="120" placeholder="Add a personal task…" required />
+        </div>
+        <div class="field" id="newPersonalTaskPhotoField" style="margin-bottom:10px;">
+          ${photoStripHtml([], { addAttr: 'id="newPersonalTaskPhotoAdd"' })}
+        </div>
+        <button type="submit" class="btn block">Add personal task</button>
+      </form>
+      <div class="section-title" style="margin-top:10px;">To do (${personalOpen.length})</div>
+      <ul class="item-list" id="openPersonalTasks">
+        ${personalOpen.length ? personalOpen.map(taskRowHtml).join("") : `<div class="empty">Nothing to do — nice.</div>`}
+      </ul>
+      ${
+        personalDone.length
+          ? `<div class="section-title">Done (${personalDone.length})</div><ul class="item-list" id="donePersonalTasks">${personalDone.map(taskRowHtml).join("")}</ul>`
           : ""
       }
     `;
 
-    function renderPendingCreatePhotos() {
-      const field = document.getElementById("newTaskPhotoField");
-      if (!field) return;
-      field.innerHTML = photoStripHtml(pendingCreateImages, {
-        addAttr: 'id="newTaskPhotoAdd"',
-        removeAttr: (i) => `data-new-task-photo-remove="${i}"`,
-      });
-      wireNewTaskPhotoAdd();
-      field.querySelectorAll("[data-new-task-photo-remove]").forEach((btn) => {
-        btn.addEventListener("click", () => {
-          pendingCreateImages.splice(parseInt(btn.dataset.newTaskPhotoRemove, 10), 1);
-          renderPendingCreatePhotos();
+    // Sets up one pending-photo picker (the "add a task" card's photo
+    // strip). getPending/setPending read and write the closure variable
+    // for that specific form (pendingGroupImages or pendingPersonalImages)
+    // — every render (initial, after adding, after removing) re-wires
+    // both the add tile and any remove buttons, since innerHTML always
+    // replaces the previous elements.
+    function setupPendingPhotos(fieldId, addId, getPending, setPending, removeAttrName) {
+      function render() {
+        const field = document.getElementById(fieldId);
+        if (!field) return;
+        field.innerHTML = photoStripHtml(getPending(), {
+          addAttr: `id="${addId}"`,
+          removeAttr: (i) => `${removeAttrName}="${i}"`,
         });
-      });
+        wireAdd();
+        field.querySelectorAll(`[${removeAttrName}]`).forEach((btn) => {
+          btn.addEventListener("click", () => {
+            getPending().splice(parseInt(btn.getAttribute(removeAttrName), 10), 1);
+            render();
+          });
+        });
+      }
+      function wireAdd() {
+        const addLabel = document.getElementById(addId);
+        if (!addLabel) return;
+        const input = addLabel.querySelector("input[type=file]");
+        input.addEventListener("change", async () => {
+          const pending = getPending();
+          const room = 3 - pending.length;
+          if (room <= 0) return;
+          const newOnes = await resizeImageFiles(input.files, room);
+          setPending(pending.concat(newOnes));
+          render();
+        });
+      }
+      wireAdd();
     }
 
-    function wireNewTaskPhotoAdd() {
-      const addLabel = document.getElementById("newTaskPhotoAdd");
-      if (!addLabel) return;
-      const input = addLabel.querySelector("input[type=file]");
-      input.addEventListener("change", async () => {
-        const room = 3 - pendingCreateImages.length;
-        if (room <= 0) return;
-        const newOnes = await resizeImageFiles(input.files, room);
-        pendingCreateImages = pendingCreateImages.concat(newOnes);
-        renderPendingCreatePhotos();
-      });
-    }
+    setupPendingPhotos(
+      "newGroupTaskPhotoField",
+      "newGroupTaskPhotoAdd",
+      () => pendingGroupImages,
+      (v) => (pendingGroupImages = v),
+      "data-new-group-task-photo-remove"
+    );
+    setupPendingPhotos(
+      "newPersonalTaskPhotoField",
+      "newPersonalTaskPhotoAdd",
+      () => pendingPersonalImages,
+      (v) => (pendingPersonalImages = v),
+      "data-new-personal-task-photo-remove"
+    );
 
-    const newTaskForm = document.getElementById("newTaskForm");
-    if (newTaskForm) {
-      wireNewTaskPhotoAdd();
-
-      newTaskForm.addEventListener("submit", async (e) => {
+    const newGroupTaskForm = document.getElementById("newGroupTaskForm");
+    if (newGroupTaskForm) {
+      newGroupTaskForm.addEventListener("submit", async (e) => {
         e.preventDefault();
-        const input = document.getElementById("taskTitle");
+        const input = document.getElementById("groupTaskTitle");
         const title = input.value.trim();
         if (!title) return;
-        const deptSelect = document.getElementById("taskDept");
+        const deptSelect = document.getElementById("groupTaskDept");
         const department_ids = deptSelect && deptSelect.value ? [parseInt(deptSelect.value, 10)] : [];
+        const assigneeSelect = document.getElementById("groupTaskAssignee");
+        const assigned_to = assigneeSelect && assigneeSelect.value ? parseInt(assigneeSelect.value, 10) : null;
         try {
-          await api("/tasks", { method: "POST", body: { title, org_id: state.orgId, department_ids, images: pendingCreateImages } });
+          await api("/tasks", {
+            method: "POST",
+            body: { title, org_id: state.orgId, department_ids, assigned_to, images: pendingGroupImages, visibility: "group" },
+          });
+          renderTasks();
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    }
+
+    const newPersonalTaskForm = document.getElementById("newPersonalTaskForm");
+    if (newPersonalTaskForm) {
+      newPersonalTaskForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = document.getElementById("personalTaskTitle");
+        const title = input.value.trim();
+        if (!title) return;
+        try {
+          await api("/tasks", {
+            method: "POST",
+            body: { title, org_id: state.orgId, images: pendingPersonalImages, visibility: "personal" },
+          });
           renderTasks();
         } catch (err) {
           showBanner(err.message);
@@ -1219,7 +1334,7 @@
               : task.created_by_name
               ? `Added by ${escapeHtml(task.created_by_name)}`
               : ""
-          }${scopeSuffix(task.scopes)}
+          }${scopeSuffix(task.scopes)}${task.assigned_to_name ? ` · Assigned to ${escapeHtml(task.assigned_to_name)}` : ""}
         </div>
       </li>
     `;
