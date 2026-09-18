@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v13";
+  const APP_VERSION = "v14";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -1571,12 +1571,19 @@
     }
   }
 
+  // A small "Automatic" badge distinguishes a system-posted message (task
+  // added / checklist completed — see lib/systemMessages.js) from
+  // something a person actually typed.
+  function systemBadgeHtml(m) {
+    return m.is_system ? ` <span class="badge">Automatic</span>` : "";
+  }
+
   function messageCardHtml(m, showOrg) {
     const images = m.images || [];
     return `
       <a class="card report-row" href="#/messages/${m.id}">
         <div class="left">
-          <h4>${escapeHtml(m.author_name || "Someone")}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
+          <h4>${escapeHtml(m.author_name || "Someone")}${systemBadgeHtml(m)}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
           <p>${escapeHtml(truncate(m.body, 140))}</p>
           ${images.length ? photoStripHtml(images) : ""}
           <p class="meta">${formatDateTime(m.created_at)} · ${m.reply_count} repl${m.reply_count === 1 ? "y" : "ies"}</p>
@@ -1610,7 +1617,7 @@
       <div class="card">
         <div class="member-top">
           <div>
-            <h4>${escapeHtml(message.author_name || "Someone")}${message.org_name ? ` <span class="badge">${escapeHtml(message.org_name)}</span>` : ""}${message.department_name ? ` <span class="badge">${escapeHtml(message.department_name)}</span>` : ""}</h4>
+            <h4>${escapeHtml(message.author_name || "Someone")}${systemBadgeHtml(message)}${message.org_name ? ` <span class="badge">${escapeHtml(message.org_name)}</span>` : ""}${message.department_name ? ` <span class="badge">${escapeHtml(message.department_name)}</span>` : ""}</h4>
             <p class="meta">${formatDateTime(message.created_at)}</p>
           </div>
           <button class="task-del" id="deleteMsgBtn" aria-label="Delete message">${iconTrash()}</button>
