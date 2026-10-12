@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v17";
+  const APP_VERSION = "v18";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -648,10 +648,54 @@
 
   function recurrenceLabel(cl) {
     if (cl.recurrence === "daily") return "Daily";
-    if (cl.recurrence === "weekly") return "Weekly";
+    if (cl.recurrence === "weekly") {
+      const days = parseDaysString(cl.recurrence_days);
+      return days.length ? days.map((d) => WEEKDAY_SHORT_NAMES[d]).join("/") : "Weekly";
+    }
     if (cl.recurrence === "monthly") return "Monthly";
     if (cl.recurrence === "every_n_days") return `Every ${cl.recurrence_n}d`;
     return cl.recurrence;
+  }
+
+  // ---------- Weekly "which day(s)" toggle (shared by the new-checklist
+  // form and the "Edit items" screen) ----------
+
+  // Monday = 0 .. Sunday = 6, matching lib/period.js on the server.
+  const WEEKDAY_SHORT_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+  // Parses a checklist's recurrence_days (a comma-separated string from
+  // the API, or possibly null/undefined) into an array of day numbers.
+  // The server is the source of truth for validation — this is just
+  // enough parsing to pre-check the right boxes.
+  function parseDaysString(raw) {
+    if (!raw) return [];
+    return String(raw)
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+  }
+
+  // `idPrefix` namespaces the checkbox name so this can appear twice on
+  // the same page (it doesn't, today, but costs nothing to keep safe).
+  // `hidden` controls the field's initial visibility — callers wire up
+  // their own show/hide toggle alongside the recurrence <select>.
+  function dayToggleFieldHtml(idPrefix, selectedDays, hidden) {
+    return `
+      <div class="field" id="${idPrefix}DaysField" ${hidden ? "hidden" : ""}>
+        <label>Which day(s)?</label>
+        <div class="dept-checks">
+          ${WEEKDAY_SHORT_NAMES.map(
+            (name, i) =>
+              `<label class="dept-check"><input type="checkbox" name="${idPrefix}Day" value="${i}" ${selectedDays.includes(i) ? "checked" : ""} /> ${name}</label>`
+          ).join("")}
+        </div>
+        <div class="meta" style="margin-top:4px;">Leave all unchecked for the old behavior — one run per calendar week, opened on whichever day you first check something off.</div>
+      </div>
+    `;
+  }
+
+  function readDayToggleField(view, idPrefix) {
+    return Array.from(view.querySelectorAll(`input[name="${idPrefix}Day"]:checked`)).map((cb) => parseInt(cb.value, 10));
   }
 
   // ---------- Item builder card (shared by the new-checklist form and the
@@ -796,6 +840,7 @@
           description: source.checklist.description || "",
           recurrence: source.checklist.recurrence,
           recurrence_n: source.checklist.recurrence_n || 3,
+          recurrenceDays: parseDaysString(source.checklist.recurrence_days),
           visibility: source.checklist.visibility,
           departmentIds:
             String(source.checklist.org_id) === String(state.orgId) ? (source.checklist.scopes || []).map((s) => s.id) : [],
@@ -858,6 +903,7 @@
             <input type="number" id="clN" min="1" max="365" value="${(prefill && prefill.recurrence_n) || 3}" />
           </div>
         </div>
+        ${dayToggleFieldHtml("cl", (prefill && prefill.recurrenceDays) || [], !prefill || prefill.recurrence !== "weekly")}
         ${
           pickableDepartments.length
             ? `<div class="field" id="clDeptField">
@@ -937,8 +983,10 @@
 
     const recurrenceSelect = document.getElementById("clRecurrence");
     const nField = document.getElementById("clNField");
+    const daysField = document.getElementById("clDaysField");
     recurrenceSelect.addEventListener("change", () => {
       nField.hidden = recurrenceSelect.value !== "every_n_days";
+      daysField.hidden = recurrenceSelect.value !== "weekly";
     });
 
     document.getElementById("newChecklistForm").addEventListener("submit", async (e) => {
@@ -950,6 +998,7 @@
       const description = document.getElementById("clDesc").value.trim();
       const recurrence = recurrenceSelect.value;
       const recurrence_n = parseInt(document.getElementById("clN").value, 10) || 3;
+      const recurrence_days = readDayToggleField(view, "cl");
       const items = Array.from(itemRows.children)
         .map(readItemBuilderCard)
         .filter((it) => it.label);
@@ -980,7 +1029,7 @@
       try {
         const data = await api("/checklists", {
           method: "POST",
-          body: { title, description, recurrence, recurrence_n, items, org_id: state.orgId, department_ids, visibility },
+          body: { title, description, recurrence, recurrence_n, recurrence_days, items, org_id: state.orgId, department_ids, visibility },
         });
         location.hash = `#/checklists/${data.id}`;
       } catch (err) {
@@ -1310,8 +1359,9 @@
         <label for="eclDesc">Description (optional)</label>
         <textarea id="eclDesc" maxlength="300" placeholder="What's this for?">${escapeHtml(checklist.description || "")}</textarea>
       </div>
+      ${checklist.recurrence === "weekly" ? dayToggleFieldHtml("ecl", parseDaysString(checklist.recurrence_days), false) : ""}
       <div class="error-text" id="eclError" hidden></div>
-      <button type="button" class="btn block" id="eclSaveBtn">Save title &amp; description</button>
+      <button type="button" class="btn block" id="eclSaveBtn">Save details</button>
 
       <div class="field" style="margin-top:28px;">
         <label>Items</label>
@@ -1338,8 +1388,14 @@
         errorEl.hidden = false;
         return;
       }
+      const body = { title, description };
+      // Only present (and only sent) for a weekly checklist — the PATCH
+      // handler leaves recurrence_days alone when this key is omitted, so
+      // a daily/monthly/every-N-days checklist's (always-null) value is
+      // never touched here.
+      if (checklist.recurrence === "weekly") body.recurrence_days = readDayToggleField(view, "ecl");
       try {
-        await api(`/checklists/${id}`, { method: "PATCH", body: { title, description } });
+        await api(`/checklists/${id}`, { method: "PATCH", body });
         renderChecklistEditItems(id);
       } catch (err) {
         errorEl.textContent = err.message;
