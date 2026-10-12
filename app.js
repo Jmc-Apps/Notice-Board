@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v21";
+  const APP_VERSION = "v22";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -591,10 +591,18 @@
       return;
     }
 
-    const groupChecklists = data.checklists.filter((c) => c.visibility !== "personal");
-    const personalChecklists = data.checklists.filter((c) => c.visibility === "personal");
+    // A checklist whose current run is already completed drops off this
+    // screen entirely — it's done, there's nothing left to fill in here —
+    // rather than sitting around with a "Done" badge. "View last week's
+    // completed" (below) is where to find it instead.
+    const notYetDone = data.checklists.filter((c) => c.current_run.status !== "completed");
+    const groupChecklists = notYetDone.filter((c) => c.visibility !== "personal");
+    const personalChecklists = notYetDone.filter((c) => c.visibility === "personal");
     const showingPersonal = state.checklistView === "personal";
     const shown = showingPersonal ? personalChecklists : groupChecklists;
+    // "Nothing to show" reads differently depending on *why* — distinguish
+    // "none exist at all" from "they exist, you've just finished them all".
+    const totalOfKind = (showingPersonal ? data.checklists.filter((c) => c.visibility === "personal") : data.checklists.filter((c) => c.visibility !== "personal")).length;
 
     const view = document.getElementById("view");
     view.innerHTML = `
@@ -604,10 +612,13 @@
           ? `<p class="meta" style="margin:0 0 10px;">Only visible to you — not even an admin or owner can see these.</p>`
           : ""
       }
+      <a class="btn secondary block" style="margin-bottom:14px;" href="#/checklists/recent-completed">View last week's completed checklists</a>
       ${
         shown.length
           ? shown.map(checklistCardHtml).join("")
-          : `<div class="empty">No ${showingPersonal ? "personal" : "group"} checklists yet.</div>`
+          : totalOfKind
+            ? `<div class="empty">All caught up — every ${showingPersonal ? "personal" : "group"} checklist is done for now.</div>`
+            : `<div class="empty">No ${showingPersonal ? "personal" : "group"} checklists yet.</div>`
       }
     `;
 
@@ -623,6 +634,45 @@
       location.hash = "#/checklists/new";
     });
     app.appendChild(fab);
+  }
+
+  // ---------- "Last week's completed checklists" (rolling 7 days, every
+  // checklist completion across the org this person can see — group and
+  // personal together, not split by the Group/Personal toggle) ----------
+
+  async function renderRecentCompleted() {
+    shell("checklists", `<div class="empty">Loading…</div>`);
+    let data;
+    try {
+      data = await api(`/checklists/recent-completed?org_id=${state.orgId}`);
+    } catch (err) {
+      showBanner(err.message);
+      location.hash = "#/checklists";
+      return;
+    }
+
+    const view = document.getElementById("view");
+    view.innerHTML = `
+      <a class="back-link" href="#/checklists">${iconChevronLeft()} Checklists</a>
+      <h2>Completed in the last week</h2>
+      ${
+        data.completed.length
+          ? data.completed.map(recentCompletedRowHtml).join("")
+          : `<div class="empty">Nothing completed in the last 7 days yet.</div>`
+      }
+    `;
+  }
+
+  function recentCompletedRowHtml(entry) {
+    return `
+      <a class="card report-row" href="#/checklists/${entry.checklist_id}/reports/${entry.run_id}">
+        <div class="left">
+          <h4>${escapeHtml(entry.title)}${entry.visibility === "personal" ? " (Personal)" : ""}</h4>
+          <p>${escapeHtml(entry.period_label)} · Completed by ${escapeHtml(entry.completed_by_name || "someone")} · ${formatDateTime(entry.completed_at)}${scopeSuffix(entry.scopes)}</p>
+        </div>
+        <div class="chev">${iconChevron()}</div>
+      </a>
+    `;
   }
 
   function checklistCardHtml(cl) {
@@ -2827,6 +2877,7 @@
       if (parts[0] === "orgs" && parts[1]) return renderOrgDetail(parts[1]);
       if (parts[0] === "checklists" && parts.length === 1) return renderChecklistList();
       if (parts[0] === "checklists" && parts[1] === "new") return renderChecklistForm(parts[2]);
+      if (parts[0] === "checklists" && parts[1] === "recent-completed") return renderRecentCompleted();
       if (parts[0] === "checklists" && parts[2] === "edit") return renderChecklistEditItems(parts[1]);
       if (parts[0] === "checklists" && parts.length === 2) return renderChecklistDetail(parts[1]);
       if (parts[0] === "checklists" && parts[2] === "history") return renderChecklistHistory(parts[1]);
