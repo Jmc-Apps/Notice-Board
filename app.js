@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v14";
+  const APP_VERSION = "v16";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -382,6 +382,9 @@
   function iconBell() {
     return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`;
   }
+  function iconPencil() {
+    return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg>`;
+  }
 
   // ---------- Shell (header + bottom tab bar) ----------
 
@@ -648,6 +651,94 @@
     return cl.recurrence;
   }
 
+  // ---------- Item builder card (shared by the new-checklist form and the
+  // "Edit items" screen's "add an item" section) ----------
+
+  const ANSWER_TYPE_LABELS = { checkbox: "Checkbox", text: "Text", number: "Number", section: "Section title" };
+
+  // Renders one item-configuration card: label + type, up/down + remove
+  // controls, and — for anything but a section title — the conditional
+  // follow-up text box config and the directional photo requirement.
+  // `item` is optional (an existing item's fields, for pre-filling); the
+  // caller (addItemRow / the "add an item" row in Edit items) always
+  // starts it blank.
+  function itemBuilderCardHtml(item) {
+    item = item || {};
+    const answerType = item.answer_type || "checkbox";
+    const isSection = answerType === "section";
+    const hasCond = !!item.conditional_label;
+    return `
+      <div class="item-builder-card" data-answer-type="${answerType}">
+        <div class="ibc-top">
+          <input type="text" class="ibcLabel" maxlength="120" placeholder="${isSection ? "Section title" : "Item"}" value="${escapeHtml(item.label || "")}" />
+          <select class="ibcType" title="How this item is answered">
+            <option value="checkbox" ${answerType === "checkbox" ? "selected" : ""}>Checkbox</option>
+            <option value="text" ${answerType === "text" ? "selected" : ""}>Text</option>
+            <option value="number" ${answerType === "number" ? "selected" : ""}>Number</option>
+            <option value="section" ${isSection ? "selected" : ""}>Section title</option>
+          </select>
+        </div>
+        <div class="ibc-extras" ${isSection ? "hidden" : ""}>
+          <label class="ibc-toggle">
+            <input type="checkbox" class="ibcCondToggle" ${hasCond ? "checked" : ""} /> Add a follow-up text box
+          </label>
+          <div class="ibc-cond-fields" ${hasCond ? "" : "hidden"}>
+            <input type="text" class="ibcCondLabel" maxlength="120" placeholder="e.g. What was donated?" value="${escapeHtml(item.conditional_label || "")}" />
+            <select class="ibcCondWhen">
+              <option value="checked" ${item.conditional_when === "checked" ? "selected" : ""}>Show when checked</option>
+              <option value="unchecked" ${item.conditional_when !== "checked" ? "selected" : ""}>Show when unchecked</option>
+            </select>
+          </div>
+          <label class="ibc-photo-field">
+            <span>Photo</span>
+            <select class="ibcPhotoReq">
+              <option value="" ${!item.photo_required_when ? "selected" : ""}>Not required</option>
+              <option value="checked" ${item.photo_required_when === "checked" ? "selected" : ""}>Required when checked</option>
+              <option value="unchecked" ${item.photo_required_when === "unchecked" ? "selected" : ""}>Required when unchecked</option>
+            </select>
+          </label>
+        </div>
+        <div class="ibc-move-row">
+          <button type="button" class="ibc-move" data-dir="up" aria-label="Move item up">↑</button>
+          <button type="button" class="ibc-move" data-dir="down" aria-label="Move item down">↓</button>
+          <button type="button" class="ibc-remove" aria-label="Remove item">${iconTrash()}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // Wires the parts of a card that are purely internal to it (showing/
+  // hiding the conditional-text and photo fields as the type/toggle
+  // change). Move/remove are wired separately by the caller, since what
+  // "move" and "remove" actually do differs between the new-checklist
+  // form (pure DOM reordering, nothing saved yet) and the Edit items
+  // screen (an immediate API call against a real item).
+  function wireItemBuilderCard(card) {
+    const typeSelect = card.querySelector(".ibcType");
+    const extras = card.querySelector(".ibc-extras");
+    typeSelect.addEventListener("change", () => {
+      extras.hidden = typeSelect.value === "section";
+    });
+    const condToggle = card.querySelector(".ibcCondToggle");
+    const condFields = card.querySelector(".ibc-cond-fields");
+    condToggle.addEventListener("change", () => {
+      condFields.hidden = !condToggle.checked;
+    });
+  }
+
+  // Reads one card back into the shape the API expects for a checklist
+  // item (create()'s items[] / addItem()'s body).
+  function readItemBuilderCard(card) {
+    const answerType = card.querySelector(".ibcType").value;
+    const isSection = answerType === "section";
+    const label = card.querySelector(".ibcLabel").value.trim();
+    const condToggle = card.querySelector(".ibcCondToggle");
+    const conditional_label = !isSection && condToggle.checked ? card.querySelector(".ibcCondLabel").value.trim() : "";
+    const conditional_when = card.querySelector(".ibcCondWhen").value;
+    const photo_required_when = !isSection ? card.querySelector(".ibcPhotoReq").value || null : null;
+    return { label, answer_type: answerType, conditional_label, conditional_when, photo_required_when };
+  }
+
   // ---------- New checklist ----------
 
   async function renderChecklistForm() {
@@ -738,23 +829,25 @@
     syncDeptFieldVisibility();
 
     const itemRows = document.getElementById("itemRows");
-    function addItemRow(value, requiresPhoto, answerType) {
-      const row = document.createElement("div");
-      row.className = "item-input-row";
-      row.innerHTML = `
-        <input type="text" maxlength="120" placeholder="Item" value="${escapeHtml(value || "")}" />
-        <select class="itemAnswerType" title="How this item is answered">
-          <option value="checkbox" ${!answerType || answerType === "checkbox" ? "selected" : ""}>Checkbox</option>
-          <option value="text" ${answerType === "text" ? "selected" : ""}>Text</option>
-          <option value="number" ${answerType === "number" ? "selected" : ""}>Number</option>
-        </select>
-        <label class="photo-req-toggle" title="Require a photo before this item can be checked off">
-          <input type="checkbox" class="itemPhotoReq" ${requiresPhoto ? "checked" : ""} />${iconCamera()}
-        </label>
-        <button type="button" aria-label="Remove item">×</button>
-      `;
-      row.querySelector('button[aria-label="Remove item"]').addEventListener("click", () => row.remove());
-      itemRows.appendChild(row);
+    // Move/remove here act purely on the DOM — nothing's been saved to the
+    // server yet, so reordering is just rearranging these cards and
+    // removing one just drops it from what gets submitted.
+    function addItemRow(item) {
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = itemBuilderCardHtml(item);
+      const card = wrapper.firstElementChild;
+      wireItemBuilderCard(card);
+      card.querySelectorAll(".ibc-move").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (btn.dataset.dir === "up" && card.previousElementSibling) {
+            itemRows.insertBefore(card, card.previousElementSibling);
+          } else if (btn.dataset.dir === "down" && card.nextElementSibling) {
+            itemRows.insertBefore(card.nextElementSibling, card);
+          }
+        });
+      });
+      card.querySelector(".ibc-remove").addEventListener("click", () => card.remove());
+      itemRows.appendChild(card);
     }
     addItemRow();
     addItemRow();
@@ -777,11 +870,7 @@
       const recurrence = recurrenceSelect.value;
       const recurrence_n = parseInt(document.getElementById("clN").value, 10) || 3;
       const items = Array.from(itemRows.children)
-        .map((row) => ({
-          label: row.querySelector('input[type="text"]').value.trim(),
-          requires_photo: row.querySelector(".itemPhotoReq").checked,
-          answer_type: row.querySelector(".itemAnswerType").value,
-        }))
+        .map(readItemBuilderCard)
         .filter((it) => it.label);
 
       if (!title) {
@@ -791,6 +880,11 @@
       }
       if (!items.length) {
         errorEl.textContent = "Add at least one item";
+        errorEl.hidden = false;
+        return;
+      }
+      if (!items.some((it) => it.answer_type !== "section")) {
+        errorEl.textContent = "Add at least one checkable item — section titles alone aren't enough";
         errorEl.hidden = false;
         return;
       }
@@ -832,18 +926,25 @@
 
     const { checklist, run } = data;
     const isDone = run.status === "completed";
-    const allChecked = run.items.length > 0 && run.items.every((i) => i.checked);
+    // Section-title rows are plain dividers — never checkable — so they're
+    // excluded here the same way the server already excludes them from
+    // every progress count (checklist cards, past-report rows).
+    const countable = run.items.filter((i) => i.answer_type !== "section");
+    const allChecked = countable.length > 0 && countable.every((i) => i.checked);
 
     const view = document.getElementById("view");
     view.innerHTML = `
       <a class="back-link" href="#/checklists">${iconChevronLeft()} Checklists</a>
-      <h2>${escapeHtml(checklist.title)}</h2>
+      <div class="detail-header">
+        <h2>${escapeHtml(checklist.title)}</h2>
+        ${checklist.can_edit ? `<a class="icon-btn" href="#/checklists/${id}/edit" aria-label="Edit checklist">${iconPencil()}</a>` : ""}
+      </div>
       ${checklist.description ? `<p class="meta">${escapeHtml(checklist.description)}</p>` : ""}
       <div class="meta" style="margin-bottom:14px;">
         ${escapeHtml(run.period_label)} ·
         ${isDone
           ? `Completed by ${escapeHtml(run.completed_by_name || "someone")} · ${formatDateTime(run.completed_at)}`
-          : `${run.items.filter((i) => i.checked).length}/${run.items.length} checked`}
+          : `${countable.filter((i) => i.checked).length}/${countable.length} checked`}
       </div>
       <ul class="item-list" id="itemList">
         ${run.items.map((item) => itemRowHtml(item, isDone)).join("")}
@@ -916,6 +1017,25 @@
       });
     });
 
+    // The conditional follow-up text box — only rendered at all when it's
+    // currently relevant (see conditionalFieldHtml) — is saved the same
+    // way the note is: on change, without forcing a full re-render, so
+    // typing in it doesn't fight the person for focus.
+    view.querySelectorAll("[data-conditional-answer]").forEach((input) => {
+      input.addEventListener("change", async () => {
+        const itemId = input.dataset.conditionalAnswer;
+        const noteEl = view.querySelector(`[data-note="${itemId}"]`);
+        try {
+          await api(`/runs/${run.id}/items/${itemId}`, {
+            method: "PATCH",
+            body: { ...currentDoneStatePayload(itemId), note: noteEl ? noteEl.value : undefined, conditional_answer: input.value },
+          });
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    });
+
     view.querySelectorAll("[data-item-photo-add]").forEach((label) => {
       const input = label.querySelector("input[type=file]");
       input.addEventListener("change", async () => {
@@ -976,7 +1096,33 @@
     }
   }
 
+  // A section-title row is just a label-only divider — never checkable,
+  // no note/photo/answer of its own — in both the live view and a
+  // completed report.
+  function sectionRowHtml(item) {
+    return `<li class="item item-section"><h4>${escapeHtml(item.label)}</h4></li>`;
+  }
+
+  // The conditional follow-up text box only shows once the item is in the
+  // state it's configured to appear for ('checked' or 'unchecked') — and
+  // only at all if this item has one configured. Works the same way for
+  // checkbox/text/number items, since all three report a uniform
+  // `checked` flag (see toggleItem() on the server).
+  function conditionalFieldHtml(item, readonly) {
+    if (!item.conditional_label) return "";
+    const shouldShow = item.conditional_when === "checked" ? !!item.checked : !item.checked;
+    if (!shouldShow) return "";
+    return `
+      <div class="item-conditional">
+        <label class="item-conditional-label" for="cond-${item.item_id}">${escapeHtml(item.conditional_label)}</label>
+        <input id="cond-${item.item_id}" class="item-conditional-answer" type="text" maxlength="500" placeholder="Answer…" value="${escapeHtml(item.conditional_answer || "")}" data-conditional-answer="${item.item_id}" ${readonly ? "disabled" : ""} />
+      </div>
+    `;
+  }
+
   function itemRowHtml(item, readonly) {
+    if (item.answer_type === "section") return sectionRowHtml(item);
+
     const images = item.images || [];
     const strip = readonly
       ? photoStripHtml(images)
@@ -991,14 +1137,18 @@
     const answerField = isCheckbox
       ? ""
       : `<input class="item-answer" type="${item.answer_type === "number" ? "number" : "text"}" inputmode="${item.answer_type === "number" ? "decimal" : "text"}" maxlength="500" placeholder="${item.answer_type === "number" ? "Enter a number…" : "Enter an answer…"}" value="${escapeHtml(item.answer || "")}" data-answer="${item.item_id}" ${readonly ? "disabled" : ""} />`;
+    const photoBadge = item.photo_required_when
+      ? `<span class="badge photo-req">📷 Required when ${item.photo_required_when}</span>`
+      : "";
     return `
       <li class="item ${item.checked ? "done" : ""}">
         <label class="item-main">
           ${doneControl}
           <span>${escapeHtml(item.label)}</span>
-          ${item.requires_photo ? '<span class="badge photo-req">📷 Photo required</span>' : ""}
+          ${photoBadge}
         </label>
         ${answerField}
+        ${conditionalFieldHtml(item, readonly)}
         <input class="item-note" type="text" maxlength="2000" placeholder="Add a note…" value="${escapeHtml(item.note || "")}" data-note="${item.item_id}" ${readonly ? "disabled" : ""} />
         ${strip}
         <div class="item-meta">${
@@ -1008,6 +1158,159 @@
         }</div>
       </li>
     `;
+  }
+
+  // ---------- Edit an existing checklist (title/description + items) ----------
+  //
+  // Gated to whoever could have created the checklist in the first place
+  // — an admin/owner for a group checklist, the creator for a personal
+  // one — exactly mirroring requireChecklistEditPermission() on the
+  // server (see lib/handlers/checklists.js). The server surfaces that as
+  // checklist.can_edit on the detail response, so there's no separate
+  // permission lookup needed here: the "Edit" link on the detail page
+  // only renders when it's true, and this screen double-checks it before
+  // rendering anything editable, in case someone navigates here directly.
+  //
+  // Items themselves aren't edited in place — only added, removed, and
+  // reordered — so there's no risk of this screen clobbering someone
+  // else's in-progress answers on today's run.
+  function existingItemCardHtml(item) {
+    const badges = [];
+    if (item.answer_type !== "checkbox") badges.push(`<span class="badge">${ANSWER_TYPE_LABELS[item.answer_type] || item.answer_type}</span>`);
+    if (item.conditional_label) {
+      badges.push(`<span class="badge">💬 ${escapeHtml(item.conditional_label)} — shown when ${item.conditional_when}</span>`);
+    }
+    if (item.photo_required_when) badges.push(`<span class="badge photo-req">📷 Required when ${item.photo_required_when}</span>`);
+    return `
+      <div class="item-builder-card existing-item-card" data-item-id="${item.id}">
+        <div class="ibc-top">
+          <span class="ibc-static-label ${item.answer_type === "section" ? "section-label" : ""}">${escapeHtml(item.label)}</span>
+        </div>
+        ${badges.length ? `<div class="ibc-badges">${badges.join("")}</div>` : ""}
+        <div class="ibc-move-row">
+          <button type="button" class="ibc-move" data-dir="up" aria-label="Move item up">↑</button>
+          <button type="button" class="ibc-move" data-dir="down" aria-label="Move item down">↓</button>
+          <button type="button" class="ibc-remove" aria-label="Remove item">${iconTrash()}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  async function renderChecklistEditItems(id) {
+    shell("checklists", `<div class="empty">Loading…</div>`);
+    let data;
+    try {
+      data = await api(`/checklists/${id}`);
+    } catch (err) {
+      showBanner(err.message);
+      location.hash = "#/checklists";
+      return;
+    }
+
+    const { checklist } = data;
+    if (!checklist.can_edit) {
+      showBanner("You don't have permission to edit this checklist");
+      location.hash = `#/checklists/${id}`;
+      return;
+    }
+
+    const view = document.getElementById("view");
+    view.innerHTML = `
+      <a class="back-link" href="#/checklists/${id}">${iconChevronLeft()} ${escapeHtml(checklist.title)}</a>
+      <h2>Edit checklist</h2>
+      <div class="field">
+        <label for="eclTitle">Title</label>
+        <input type="text" id="eclTitle" maxlength="80" value="${escapeHtml(checklist.title)}" />
+      </div>
+      <div class="field">
+        <label for="eclDesc">Description (optional)</label>
+        <textarea id="eclDesc" maxlength="300" placeholder="What's this for?">${escapeHtml(checklist.description || "")}</textarea>
+      </div>
+      <div class="error-text" id="eclError" hidden></div>
+      <button type="button" class="btn block" id="eclSaveBtn">Save title &amp; description</button>
+
+      <div class="field" style="margin-top:28px;">
+        <label>Items</label>
+        <div id="existingItemRows">
+          ${checklist.items.length ? checklist.items.map(existingItemCardHtml).join("") : `<div class="empty">No items yet.</div>`}
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Add an item</label>
+        <div id="newItemRow"></div>
+        <div class="error-text" id="eclAddError" hidden></div>
+        <button type="button" class="btn secondary block" id="eclAddBtn">Add item</button>
+      </div>
+    `;
+
+    document.getElementById("eclSaveBtn").addEventListener("click", async () => {
+      const errorEl = document.getElementById("eclError");
+      errorEl.hidden = true;
+      const title = document.getElementById("eclTitle").value.trim();
+      const description = document.getElementById("eclDesc").value.trim();
+      if (!title) {
+        errorEl.textContent = "Title is required";
+        errorEl.hidden = false;
+        return;
+      }
+      try {
+        await api(`/checklists/${id}`, { method: "PATCH", body: { title, description } });
+        renderChecklistEditItems(id);
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.hidden = false;
+      }
+    });
+
+    // Reordering and removing an existing item both take effect
+    // immediately on the server — there's no separate "save" step for
+    // the item list, so each one just re-renders this screen on success.
+    document.getElementById("existingItemRows").querySelectorAll(".existing-item-card").forEach((card) => {
+      const itemId = card.dataset.itemId;
+      card.querySelectorAll(".ibc-move").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          try {
+            await api(`/checklists/${id}/items/${itemId}/move`, { method: "PATCH", body: { direction: btn.dataset.dir } });
+            renderChecklistEditItems(id);
+          } catch (err) {
+            showBanner(err.message);
+          }
+        });
+      });
+      card.querySelector(".ibc-remove").addEventListener("click", async () => {
+        if (!confirm("Remove this item? This can't be undone.")) return;
+        try {
+          await api(`/checklists/${id}/items/${itemId}`, { method: "DELETE" });
+          renderChecklistEditItems(id);
+        } catch (err) {
+          showBanner(err.message);
+        }
+      });
+    });
+
+    const newItemRow = document.getElementById("newItemRow");
+    newItemRow.innerHTML = itemBuilderCardHtml();
+    const newCard = newItemRow.firstElementChild;
+    wireItemBuilderCard(newCard);
+
+    document.getElementById("eclAddBtn").addEventListener("click", async () => {
+      const addErrorEl = document.getElementById("eclAddError");
+      addErrorEl.hidden = true;
+      const item = readItemBuilderCard(newCard);
+      if (!item.label) {
+        addErrorEl.textContent = "Enter a label for the new item";
+        addErrorEl.hidden = false;
+        return;
+      }
+      try {
+        await api(`/checklists/${id}/items`, { method: "POST", body: item });
+        renderChecklistEditItems(id);
+      } catch (err) {
+        addErrorEl.textContent = err.message;
+        addErrorEl.hidden = false;
+      }
+    });
   }
 
   // ---------- Checklist history (past reports) ----------
@@ -2341,6 +2644,7 @@
       if (parts[0] === "orgs" && parts[1]) return renderOrgDetail(parts[1]);
       if (parts[0] === "checklists" && parts.length === 1) return renderChecklistList();
       if (parts[0] === "checklists" && parts[1] === "new") return renderChecklistForm();
+      if (parts[0] === "checklists" && parts[2] === "edit") return renderChecklistEditItems(parts[1]);
       if (parts[0] === "checklists" && parts.length === 2) return renderChecklistDetail(parts[1]);
       if (parts[0] === "checklists" && parts[2] === "history") return renderChecklistHistory(parts[1]);
       if (parts[0] === "checklists" && parts[2] === "reports" && parts[3]) {
