@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v19";
+  const APP_VERSION = "v20";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -1280,6 +1280,21 @@
     const photoBadge = item.photo_required_when
       ? `<span class="badge photo-req">📷 Required when ${item.photo_required_when}</span>`
       : "";
+    // The generic "Add a note" box, like the photo add button above, only
+    // shows up while filling in an item that's actually configured with a
+    // follow-up text block — otherwise there's nothing it's meant to
+    // capture, so it's left out entirely rather than just disabled. A
+    // completed report is a different case: it's showing history, not
+    // offering to add anything, so any note already on record there still
+    // displays regardless of whether this item has a follow-up text block
+    // (same as a photo already on file always showing in a report).
+    const noteField = readonly
+      ? item.note
+        ? `<input class="item-note" type="text" maxlength="2000" value="${escapeHtml(item.note)}" disabled />`
+        : ""
+      : item.conditional_label
+        ? `<input class="item-note" type="text" maxlength="2000" placeholder="Add a note…" value="${escapeHtml(item.note || "")}" data-note="${item.item_id}" />`
+        : "";
     return `
       <li class="item ${item.checked ? "done" : ""}">
         <label class="item-main">
@@ -1289,7 +1304,7 @@
         </label>
         ${answerField}
         ${conditionalFieldHtml(item, readonly)}
-        <input class="item-note" type="text" maxlength="2000" placeholder="Add a note…" value="${escapeHtml(item.note || "")}" data-note="${item.item_id}" ${readonly ? "disabled" : ""} />
+        ${noteField}
         ${strip}
         <div class="item-meta">${
           item.checked_by_name
