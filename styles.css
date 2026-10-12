@@ -414,6 +414,11 @@ select:disabled {
 
 .badge.done { background: var(--green-tint); color: var(--green-dark); }
 
+/* A weekly checklist pinned to specific day(s), on any day that isn't one
+   of them — read-only, see is_scheduled_today. Dimmed, not hidden: it's
+   still tappable to view. */
+.checklist-card.not-due { opacity: 0.55; }
+
 .progress-track {
   height: 6px;
   background: var(--surface-2);

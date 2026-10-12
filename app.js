@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v20";
+  const APP_VERSION = "v21";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -629,11 +629,18 @@
     const run = cl.current_run;
     const pct = run.total ? Math.round((run.done / run.total) * 100) : 0;
     const isDone = run.status === "completed";
+    // A weekly checklist pinned to specific day(s) is read-only on any day
+    // that isn't one of them (see is_scheduled_today on the API) — greyed
+    // out in the list, same as every other checklist type. A completed
+    // run still reads as "Done" regardless of today's day, since that's
+    // more informative than "not due" once it's actually finished.
+    const notDueToday = !isDone && cl.is_scheduled_today === false;
+    const badgeLabel = isDone ? "Done" : notDueToday ? "Not due today" : recurrenceLabel(cl);
     return `
-      <a class="card checklist-card" href="#/checklists/${cl.id}">
+      <a class="card checklist-card ${notDueToday ? "not-due" : ""}" href="#/checklists/${cl.id}">
         <div class="top">
           <h3>${escapeHtml(cl.title)}</h3>
-          <span class="badge ${isDone ? "done" : ""}">${isDone ? "Done" : recurrenceLabel(cl)}</span>
+          <span class="badge ${isDone ? "done" : ""}">${badgeLabel}</span>
         </div>
         <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
         <div class="meta">${escapeHtml(run.period_label)} · ${run.done}/${run.total} checked${scopeSuffix(cl.scopes)}</div>
@@ -1056,11 +1063,22 @@
 
     const { checklist, run } = data;
     const isDone = run.status === "completed";
+    // A weekly checklist pinned to specific day(s) is read-only on any day
+    // that isn't one of them — the server enforces this on every write
+    // (toggleItem/completeRun); this just mirrors it in the UI so nobody
+    // hits a rejected request. A completed run is already read-only for
+    // its own reason, so this only ever adds the "not due" case on top of
+    // that, never overrides "Done".
+    const notDueToday = !isDone && checklist.is_scheduled_today === false;
+    const readonly = isDone || notDueToday;
     // Section-title rows are plain dividers — never checkable — so they're
     // excluded here the same way the server already excludes them from
     // every progress count (checklist cards, past-report rows).
     const countable = run.items.filter((i) => i.answer_type !== "section");
     const allChecked = countable.length > 0 && countable.every((i) => i.checked);
+    const scheduledDaysLabel = parseDaysString(checklist.recurrence_days)
+      .map((d) => WEEKDAY_SHORT_NAMES[d])
+      .join("/");
 
     const view = document.getElementById("view");
     view.innerHTML = `
@@ -1077,12 +1095,15 @@
         ${escapeHtml(run.period_label)} ·
         ${isDone
           ? `Completed by ${escapeHtml(run.completed_by_name || "someone")} · ${formatDateTime(run.completed_at)}`
-          : `${countable.filter((i) => i.checked).length}/${countable.length} checked`}
+          : notDueToday
+            ? `Not due today — this checklist runs on ${scheduledDaysLabel}`
+            : `${countable.filter((i) => i.checked).length}/${countable.length} checked`}
       </div>
+      ${notDueToday ? `<p class="meta" style="margin:-8px 0 14px;">You can view it here, but checking things off opens up again on its next scheduled day.</p>` : ""}
       <ul class="item-list" id="itemList">
-        ${run.items.map((item) => itemRowHtml(item, isDone)).join("")}
+        ${run.items.map((item) => itemRowHtml(item, readonly)).join("")}
       </ul>
-      ${isDone
+      ${readonly
         ? `<a class="btn secondary block" href="#/checklists/${id}/history">View past reports</a>`
         : `<button class="btn block" id="completeBtn">Mark checklist complete</button>
            <a class="btn secondary block" style="margin-top:8px;" href="#/checklists/${id}/history">View past reports</a>`}
