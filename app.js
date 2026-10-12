@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v18";
+  const APP_VERSION = "v19";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -1257,10 +1257,17 @@
     if (item.answer_type === "section") return sectionRowHtml(item);
 
     const images = item.images || [];
+    // The "add a photo" camera icon only shows up for an item that's
+    // actually configured to need one (checked or unchecked) — otherwise
+    // there's nothing to attach a photo *for*. Existing photos (e.g. one
+    // attached before this item's requirement was last changed) still
+    // show with a remove button either way, so nobody's stuck with a
+    // stray photo they can't clear; photoStripHtml() itself renders
+    // nothing at all once there's neither a photo nor an add button to show.
     const strip = readonly
       ? photoStripHtml(images)
       : photoStripHtml(images, {
-          addAttr: `data-item-photo-add="${item.item_id}"`,
+          addAttr: item.photo_required_when ? `data-item-photo-add="${item.item_id}"` : null,
           removeAttr: (i) => `data-item-photo-remove="${item.item_id}:${i}"`,
         });
     const isCheckbox = !item.answer_type || item.answer_type === "checkbox";
