@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v23";
+  const APP_VERSION = "v24";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -2123,12 +2123,25 @@
     return m.is_system ? ` <span class="badge">Automatic</span>` : "";
   }
 
+  // A message scoped to several departments at once (the automatic
+  // "checklist completed" post for a multi-department checklist — see
+  // lib/systemMessages.js) carries them in m.scopes, same shape
+  // checklist/task scopes already use; a classic single-department
+  // message (manually posted, or an automatic task post) still just has
+  // department_name. Shows one badge per department either way.
+  function messageDeptBadgesHtml(m) {
+    if (m.scopes && m.scopes.length) {
+      return m.scopes.map((s) => ` <span class="badge">${escapeHtml(s.name)}</span>`).join("");
+    }
+    return m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : "";
+  }
+
   function messageCardHtml(m, showOrg) {
     const images = m.images || [];
     return `
       <a class="card report-row" href="#/messages/${m.id}">
         <div class="left">
-          <h4>${newDotHtml(m.is_new)}${escapeHtml(m.author_name || "Someone")}${systemBadgeHtml(m)}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
+          <h4>${newDotHtml(m.is_new)}${escapeHtml(m.author_name || "Someone")}${systemBadgeHtml(m)}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${messageDeptBadgesHtml(m)}</h4>
           <p>${escapeHtml(truncate(m.body, 140))}</p>
           ${images.length ? photoStripHtml(images) : ""}
           <p class="meta">${formatDateTime(m.created_at)} · ${m.reply_count} repl${m.reply_count === 1 ? "y" : "ies"}</p>
@@ -2162,7 +2175,7 @@
       <div class="card">
         <div class="member-top">
           <div>
-            <h4>${escapeHtml(message.author_name || "Someone")}${systemBadgeHtml(message)}${message.org_name ? ` <span class="badge">${escapeHtml(message.org_name)}</span>` : ""}${message.department_name ? ` <span class="badge">${escapeHtml(message.department_name)}</span>` : ""}</h4>
+            <h4>${escapeHtml(message.author_name || "Someone")}${systemBadgeHtml(message)}${message.org_name ? ` <span class="badge">${escapeHtml(message.org_name)}</span>` : ""}${messageDeptBadgesHtml(message)}</h4>
             <p class="meta">${formatDateTime(message.created_at)}</p>
           </div>
           <button class="task-del" id="deleteMsgBtn" aria-label="Delete message">${iconTrash()}</button>
