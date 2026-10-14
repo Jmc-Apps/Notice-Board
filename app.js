@@ -11,7 +11,7 @@
   // actually picked up the latest build (see the org page, where it's
   // shown) rather than a stale cached PWA or an un-redeployed hosting
   // target (e.g. GitHub Pages vs. Cloudflare Pages).
-  const APP_VERSION = "v22";
+  const APP_VERSION = "v23";
   const STORAGE_TOKEN = "nb_token";
   const STORAGE_USER = "nb_user";
   const STORAGE_ORG = "nb_org_id";
@@ -667,7 +667,7 @@
     return `
       <a class="card report-row" href="#/checklists/${entry.checklist_id}/reports/${entry.run_id}">
         <div class="left">
-          <h4>${escapeHtml(entry.title)}${entry.visibility === "personal" ? " (Personal)" : ""}</h4>
+          <h4>${newDotHtml(entry.is_new)}${escapeHtml(entry.title)}${entry.visibility === "personal" ? " (Personal)" : ""}</h4>
           <p>${escapeHtml(entry.period_label)} · Completed by ${escapeHtml(entry.completed_by_name || "someone")} · ${formatDateTime(entry.completed_at)}${scopeSuffix(entry.scopes)}</p>
         </div>
         <div class="chev">${iconChevron()}</div>
@@ -689,13 +689,21 @@
     return `
       <a class="card checklist-card ${notDueToday ? "not-due" : ""}" href="#/checklists/${cl.id}">
         <div class="top">
-          <h3>${escapeHtml(cl.title)}</h3>
+          <h3>${newDotHtml(run.is_new)}${escapeHtml(cl.title)}</h3>
           <span class="badge ${isDone ? "done" : ""}">${badgeLabel}</span>
         </div>
         <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
         <div class="meta">${escapeHtml(run.period_label)} · ${run.done}/${run.total} checked${scopeSuffix(cl.scopes)}</div>
       </a>
     `;
+  }
+
+  // A small red dot flagging exactly which row is contributing to the
+  // app-icon badge count (see syncBadge() above) — task.is_new,
+  // current_run.is_new (checklists), entry.is_new (last week's
+  // completed), and message.is_new all come straight from the API.
+  function newDotHtml(isNew) {
+    return isNew ? `<span class="new-dot" title="New" aria-label="New"></span>` : "";
   }
 
   function scopeSuffix(scopes) {
@@ -1898,6 +1906,7 @@
       <li class="task ${task.done ? "done" : ""}">
         <div class="task-top">
           <input type="checkbox" data-task-done="${task.id}" ${task.done ? "checked" : ""} />
+          ${newDotHtml(task.is_new)}
           <input class="task-title" type="text" value="${escapeHtml(task.title)}" disabled />
           <button class="task-del" data-task-del="${task.id}" aria-label="Remove task">×</button>
         </div>
@@ -2119,7 +2128,7 @@
     return `
       <a class="card report-row" href="#/messages/${m.id}">
         <div class="left">
-          <h4>${escapeHtml(m.author_name || "Someone")}${systemBadgeHtml(m)}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
+          <h4>${newDotHtml(m.is_new)}${escapeHtml(m.author_name || "Someone")}${systemBadgeHtml(m)}${showOrg && m.org_name ? ` <span class="badge">${escapeHtml(m.org_name)}</span>` : ""}${m.department_name ? ` <span class="badge">${escapeHtml(m.department_name)}</span>` : ""}</h4>
           <p>${escapeHtml(truncate(m.body, 140))}</p>
           ${images.length ? photoStripHtml(images) : ""}
           <p class="meta">${formatDateTime(m.created_at)} · ${m.reply_count} repl${m.reply_count === 1 ? "y" : "ies"}</p>

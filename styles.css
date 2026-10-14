@@ -414,6 +414,20 @@ select:disabled {
 
 .badge.done { background: var(--green-tint); color: var(--green-dark); }
 
+/* A small unread/new indicator next to a task, checklist, or message row —
+   shows exactly which item(s) are contributing to the app-icon badge
+   count, so there's something more specific to go on than just a number. */
+.new-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 /* A weekly checklist pinned to specific day(s), on any day that isn't one
    of them — read-only, see is_scheduled_today. Dimmed, not hidden: it's
    still tappable to view. */
